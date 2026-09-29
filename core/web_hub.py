@@ -23,7 +23,9 @@ from core.audit import get_audit_logger
 from core.config import Settings
 from core.context import request_context
 from core.devices import DeviceRegistry, ping_device
+from core.netinfo import hub_urls, print_hub_banner
 from core.permissions import Role
+from core.push import PushStore
 from core.registry import ToolRegistry
 from core.reminders import ReminderNotifier
 from core.users import UserProfile
@@ -74,6 +76,11 @@ class ConfirmBody(BaseModel):
     allowed: bool
 
 
+class PushSubBody(BaseModel):
+    endpoint: str
+    keys: dict[str, str]
+
+
 def _account_to_profile(acc: Account) -> UserProfile:
     return UserProfile(
         chat_id=acc.id,
@@ -113,6 +120,7 @@ def create_app(
     # Tag local device as hub-owned until users claim devices.
     audit = get_audit_logger(settings.audit_log_path)
     broker = WebConfirmBroker(timeout_seconds=settings.confirmation_timeout_seconds)
+    push = PushStore(settings.data_dir / "push.json")
     agent_locks: dict[str, threading.Lock] = {}
     agent_locks_guard = threading.Lock()
 
@@ -171,6 +179,8 @@ def create_app(
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
+        port = int(os.getenv("NEXUS_WEB_PORT", "8743"))
+        host = os.getenv("NEXUS_WEB_HOST", "0.0.0.0")
         return {
             "ok": True,
             "product": "Nexus Node",
@@ -178,6 +188,8 @@ def create_app(
             "has_owner": accounts.has_owner,
             "open_signup": open_signup or not accounts.has_owner,
             "tools": len(registry),
+            "urls": hub_urls(host, port),
+            "push": True,
         }
 
     @app.post("/api/auth/register")
@@ -372,6 +384,28 @@ def create_app(
             raise HTTPException(404, "Confirmation not found or expired")
         return {"ok": True}
 
+    @app.get("/api/push/vapid")
+    def push_vapid(account: Account = Depends(require_account)) -> dict[str, Any]:
+        _ = account
+        return {"publicKey": push.public_b64}
+
+    @app.post("/api/push/subscribe")
+    def push_subscribe(
+        body: PushSubBody, account: Account = Depends(require_account)
+    ) -> dict[str, Any]:
+        try:
+            push.add(account.id, {"endpoint": body.endpoint, "keys": body.keys})
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True}
+
+    @app.delete("/api/push/subscribe")
+    def push_unsubscribe(
+        body: PushSubBody, account: Account = Depends(require_account)
+    ) -> dict[str, Any]:
+        push.remove(account.id, body.endpoint)
+        return {"ok": True}
+
     @app.websocket("/api/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:
         await websocket.accept()
@@ -414,9 +448,20 @@ def create_app(
             broker.unsubscribe(account.id, queue)
 
     # Reminder pings → in-app via audit + optional WS notify to that user id
-    def _send_reminder(user_id: str, text: str) -> None:
-        broker._notify(user_id, {"type": "reminder", "text": text})
-        audit.log("reminder_delivered", user_id=user_id, text=text[:120])
+    def _send_reminder(user_id: str, text: str) -> bool:
+        live = broker.notify(user_id, {"type": "reminder", "text": text})
+        pushed = push.send(user_id, "Nexus Node", text)
+        if live or pushed:
+            audit.log(
+                "reminder_delivered",
+                user_id=user_id,
+                text=text[:120],
+                ws=live,
+                push=pushed,
+            )
+            return True
+        # Nobody listening and no push subscription — retry next tick.
+        return False
 
     notifier = ReminderNotifier(
         daily_root=settings.data_dir / "daily",
@@ -473,6 +518,5 @@ def run_web_server(
     import uvicorn
 
     app = create_app(settings, registry)
-    print(f"Nexus Node web hub: http://{host}:{port}")
-    print("Open on this PC or phone (same Wi‑Fi). First register = owner.")
+    print_hub_banner(host, port)
     uvicorn.run(app, host=host, port=port, log_level="info")

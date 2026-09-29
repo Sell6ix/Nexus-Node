@@ -43,7 +43,8 @@ class WebConfirmBroker:
             if not buckets:
                 self._subscribers.pop(account_id, None)
 
-    def _notify(self, account_id: str, payload: dict[str, Any]) -> None:
+    def notify(self, account_id: str, payload: dict[str, Any]) -> int:
+        """Fan-out to live websockets. Returns number of subscribers notified."""
         with self._sub_lock:
             queues = list(self._subscribers.get(account_id, set()))
         for q in queues:
@@ -51,6 +52,11 @@ class WebConfirmBroker:
                 q.put_nowait(payload)
             except asyncio.QueueFull:
                 pass
+        return len(queues)
+
+    def has_subscribers(self, account_id: str) -> bool:
+        with self._sub_lock:
+            return bool(self._subscribers.get(account_id))
 
     def ask(self, account_id: str, prompt: str) -> bool:
         """Block until the user answers in the web UI (or timeout → deny)."""
@@ -58,7 +64,7 @@ class WebConfirmBroker:
         pending = PendingConfirm(prompt=prompt, account_id=account_id)
         with self._lock:
             self._pending[request_id] = pending
-        self._notify(
+        self.notify(
             account_id,
             {
                 "type": "confirm",

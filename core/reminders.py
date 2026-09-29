@@ -160,11 +160,11 @@ def mark_notified(path: Path, reminder_id: str, *, now: datetime | None = None) 
     return found
 
 
-SendFn = Callable[[str, str], None]
+SendFn = Callable[[str, str], bool | None]
 
 
 class ReminderNotifier:
-    """Background poller: due reminders → Telegram DM to that user."""
+    """Background poller: due reminders → user notification callback."""
 
     def __init__(
         self,
@@ -196,7 +196,6 @@ class ReminderNotifier:
         """Deliver due reminders; return count sent. Safe for tests."""
         delivered = 0
         for user_id, path, item in due_reminders(self.daily_root):
-            # Skip CLI-only placeholder namespace.
             if user_id in {"local", ""}:
                 continue
             text = str(item.get("text") or "(reminder)")
@@ -205,7 +204,9 @@ class ReminderNotifier:
             if when:
                 body += f"\n(when: {when})"
             try:
-                self.send(user_id, body)
+                ok = self.send(user_id, body)
+                if ok is False:
+                    continue
                 mark_notified(path, str(item.get("id")))
                 delivered += 1
             except Exception as exc:  # noqa: BLE001

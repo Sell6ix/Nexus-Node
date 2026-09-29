@@ -65,6 +65,9 @@ export const api = {
   invite: (label = '') =>
     request<{ code: string; expires_at: number }>('/api/invites', { method: 'POST', body: JSON.stringify({ label }) }),
   tools: () => request<{ tools: string[] }>('/api/tools'),
+  pushVapid: () => request<{ publicKey: string }>('/api/push/vapid'),
+  pushSubscribe: (body: { endpoint: string; keys: { p256dh: string; auth: string } }) =>
+    request<{ ok: boolean }>('/api/push/subscribe', { method: 'POST', body: JSON.stringify(body) }),
 }
 
 export function wsUrl(token: string): string {

@@ -1,5 +1,5 @@
 [Unit]
-Description=Nexus Node personal assistant (Telegram mode)
+Description=Nexus Node personal assistant (web hub)
 After=network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/nexus-node
 EnvironmentFile=-%h/nexus-node/.env
-ExecStart=%h/nexus-node/.venv/bin/python %h/nexus-node/main.py --mode telegram
+ExecStart=%h/nexus-node/.venv/bin/python %h/nexus-node/main.py --mode web --host 0.0.0.0 --port 8743
 Restart=on-failure
 RestartSec=5
 

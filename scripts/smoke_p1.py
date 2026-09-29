@@ -39,7 +39,7 @@ def test_reminder_delivery() -> None:
             r = daily_tools.set_reminder("buy milk", due)
             assert r["ok"] and r["reminder"]["due_at"]
 
-        notifier = ReminderNotifier(daily_root=root, send=lambda c, t: sent.append((c, t)))
+        notifier = ReminderNotifier(daily_root=root, send=lambda c, t: sent.append((c, t)) or True)
         n = notifier.tick_once()
         assert n == 1, (n, sent)
         assert sent[0][0] == "12345"
@@ -47,6 +47,26 @@ def test_reminder_delivery() -> None:
         # Second tick should not re-send
         assert notifier.tick_once() == 0
     print("OK reminder delivery")
+
+
+def test_reminder_retries_if_undelivered() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        daily_tools._ROOT = root  # type: ignore[attr-defined]
+        with request_context(user_id="999"):
+            due = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+            assert daily_tools.set_reminder("ping later", due)["ok"]
+        attempts = {"n": 0}
+
+        def fail_once(user_id: str, text: str) -> bool:
+            attempts["n"] += 1
+            return attempts["n"] > 1
+
+        notifier = ReminderNotifier(daily_root=root, send=fail_once)
+        assert notifier.tick_once() == 0
+        assert notifier.tick_once() == 1
+        assert notifier.tick_once() == 0
+    print("OK reminder retry")
 
 
 def test_home_device() -> None:
@@ -69,6 +89,7 @@ def test_home_device() -> None:
 def main() -> int:
     test_parse_when()
     test_reminder_delivery()
+    test_reminder_retries_if_undelivered()
     test_home_device()
     print("All P1 smoke checks passed.")
     return 0

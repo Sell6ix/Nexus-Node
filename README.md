@@ -32,6 +32,29 @@ python main.py --mode web
 
 Open **http://\<pc-ip\>:8743** on the PC or phone (same Wi‑Fi).
 
+### One command after the first setup
+
+```bash
+./scripts/start.sh                 # Linux / macOS
+.\scripts\start.ps1                # Windows
+```
+
+Autostart on login:
+
+```bash
+./scripts/install-autostart-linux.sh
+# Windows:  .\scripts\install-autostart-windows.ps1
+```
+
+### Phone away from home (Tailscale)
+
+1. Install [Tailscale](https://tailscale.com) on the hub PC and the phone (same account).
+2. Start the hub, copy the printed `http://100.x.x.x:8743` URL.
+3. Open that URL on the phone. Add to Home Screen.
+4. Do **not** port-forward 8743 to the public internet.
+
+Closed-app reminder notifications need HTTPS. On Tailscale: `tailscale serve --bg 8743` then use the `https://<machine>.ts.net` URL, or enable notifications while the app is open on LAN HTTP.
+
 Dev UI with hot reload:
 
 ```bash

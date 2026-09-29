@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { api, getToken, setToken, wsUrl } from './api'
 import type { User, Device } from './api'
+import { enablePush, registerServiceWorker, showLocalNotification } from './push'
 
 type Msg = { role: 'user' | 'assistant' | 'system'; text: string }
 type ConfirmReq = { id: string; prompt: string; timeout: number }
@@ -48,6 +49,11 @@ export default function App() {
 
   useEffect(() => {
     if (boot !== 'app') return
+    void registerServiceWorker()
+  }, [boot])
+
+  useEffect(() => {
+    if (boot !== 'app') return
     const token = getToken()
     if (!token) return
     let alive = true
@@ -65,6 +71,7 @@ export default function App() {
           if (data.type === 'reminder') {
             setToast(data.text || 'Reminder')
             setMessages((m) => [...m, { role: 'system', text: data.text }])
+            showLocalNotification('Nexus Node', data.text)
           }
         } catch {
           /* ignore */
@@ -570,6 +577,7 @@ function SettingsPanel({
   const [baseUrl, setBaseUrl] = useState(user.api_base_url || '')
   const [invite, setInvite] = useState<string | null>(null)
   const [tools, setTools] = useState<string[]>([])
+  const [pushNote, setPushNote] = useState('')
 
   useEffect(() => {
     void api.tools().then((t) => setTools(t.tools)).catch(() => undefined)
@@ -639,6 +647,30 @@ function SettingsPanel({
             Clear key
           </button>
         </div>
+      </div>
+
+      <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">
+        <div className="font-medium">Reminders on this phone / PC</div>
+        <p className="text-xs text-[var(--muted)]">
+          Allow notifications so due reminders can wake the device when the app is closed.
+          The hub PC must stay on. Closed-app push works on HTTPS or localhost; on plain
+          Wi‑Fi HTTP you still get alerts while the app is open.
+        </p>
+        <button
+          type="button"
+          className="rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] font-semibold px-4 py-2"
+          onClick={() => {
+            void enablePush()
+              .then((msg) => {
+                setPushNote(msg)
+                onToast(msg)
+              })
+              .catch((e) => onToast(e instanceof Error ? e.message : 'Push failed'))
+          }}
+        >
+          Enable notifications
+        </button>
+        {pushNote && <p className="text-xs text-[var(--muted)]">{pushNote}</p>}
       </div>
 
       {user.role === 'owner' && (
