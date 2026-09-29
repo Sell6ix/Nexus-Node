@@ -196,8 +196,8 @@ class ReminderNotifier:
         """Deliver due reminders; return count sent. Safe for tests."""
         delivered = 0
         for user_id, path, item in due_reminders(self.daily_root):
-            # Skip CLI-only local users without a numeric Telegram chat id.
-            if user_id in {"local"} or not user_id.lstrip("-").isdigit():
+            # Skip CLI-only placeholder namespace.
+            if user_id in {"local", ""}:
                 continue
             text = str(item.get("text") or "(reminder)")
             when = item.get("when") or item.get("due_at") or ""

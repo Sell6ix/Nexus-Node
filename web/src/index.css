@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+:root {
+  --ink: #071412;
+  --panel: #0f2a26;
+  --panel-2: #143530;
+  --line: rgba(200, 245, 66, 0.14);
+  --text: #e8f2ee;
+  --muted: #8aa8a0;
+  --accent: #c8f542;
+  --accent-ink: #10210c;
+  --danger: #ff6b5a;
+  --warn: #ffc857;
+  font-family: "DM Sans", system-ui, sans-serif;
+  color: var(--text);
+  background: var(--ink);
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(200, 245, 66, 0.12), transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, rgba(56, 189, 160, 0.14), transparent 50%),
+    linear-gradient(180deg, #0b1f1c 0%, #071412 55%, #050d0c 100%);
+  background-attachment: fixed;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+.brand {
+  font-family: Syne, "DM Sans", sans-serif;
+  letter-spacing: -0.03em;
+}

@@ -2,16 +2,18 @@
 """Nexus Node — multi-device daily assistant.
 
 Modes:
+  web       — phone + PC web app (recommended)
   cli       — local console
-  telegram  — Telegram hub (phone control)
-  both      — CLI + Telegram
-  worker    — expose local tools to a hub over HTTP
+  worker    — expose this PC's tools to a hub
+  telegram  — legacy Telegram hub
+  both      — CLI + Telegram (legacy)
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -70,11 +72,7 @@ def run_repl(agent: Agent) -> int:
     print("Nexus Node — daily assistant")
     print(f"Device: {settings.device_id} ({settings.device_name})")
     print(f"Model: {settings.openai_model}")
-    print(f"OpenAI/.env key: {'yes' if settings.has_openai else 'no (users can /apikey in Telegram)'}")
-    print(
-        "Telegram: "
-        + ("bot ready" if settings.has_telegram_bot else "not configured")
-    )
+    print(f"OpenAI/.env key: {'yes' if settings.has_openai else 'no (set per user in web app)'}")
     print(f"Tools: {len(agent.registry)}")
     print("Type a command, or 'help' / 'tools' / 'reset' / 'exit'.\n")
 
@@ -95,7 +93,7 @@ def run_repl(agent: Agent) -> int:
                 "Commands:\n"
                 "  <text> — agent\n"
                 "  tools / reset / exit\n"
-                "Phone: python main.py --mode telegram\n"
+                "Web app: python main.py --mode web\n"
                 "Other PC worker: python main.py --mode worker\n"
             )
             continue
@@ -114,11 +112,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-c", "--command", help="Run one command and exit")
     parser.add_argument(
         "--mode",
-        choices=("cli", "telegram", "both", "worker"),
-        default="cli",
+        choices=("web", "cli", "telegram", "both", "worker"),
+        default="web",
     )
     parser.add_argument("--list-tools", action="store_true")
     parser.add_argument("--dump-schemas", action="store_true")
+    parser.add_argument("--host", default=None, help="Web bind host (default 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=None, help="Web bind port (default 8743)")
     args = parser.parse_args(argv)
 
     load_dotenv_if_present()
@@ -141,11 +141,22 @@ def main(argv: list[str] | None = None) -> int:
     users = UserStore(settings.users_dir)
     audit = get_audit_logger(settings.audit_log_path)
 
+    if args.mode == "web":
+        from core.web_hub import run_web_server
+
+        host = args.host or os.getenv("NEXUS_WEB_HOST", "0.0.0.0")
+        port = args.port or int(os.getenv("NEXUS_WEB_PORT", "8743"))
+        try:
+            run_web_server(settings, registry, host=host, port=port)
+        except KeyboardInterrupt:
+            print("\nBye.")
+        return 0
+
     if args.mode == "worker":
         if not settings.worker_token:
             print(
                 "WORKER_TOKEN (or DEVICE_TOKEN) is required for --mode worker.\n"
-                "Generate a long random string and put the same value on the hub via /device_add.",
+                "Generate a long random string and register it in the web Devices panel.",
                 file=sys.stderr,
             )
             return 2

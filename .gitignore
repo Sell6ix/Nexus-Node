@@ -6,7 +6,11 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
-dist/
-build/
+/dist/
+/build/
+web/node_modules/
+web/dist/
 data/**
 !data/.gitkeep
+data/jwt_secret.txt
+data/accounts.json

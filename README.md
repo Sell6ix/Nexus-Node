@@ -1,50 +1,56 @@
 # Nexus Node
 
-Daily personal assistant for **multiple people** and **multiple devices**.
+Personal assistant for **phone + PC** — multi-user web app, no Telegram required.
 
-Natural language → LLM tool calling → Python tools on the chosen device.
+Each person has an account, their own AI API key, and can control devices on the hub network.
 
-## What you get
+## How it works
 
-- **BYOK** — each Telegram user sets their own AI key (`/apikey`), model, and OpenAI-compatible `/baseurl`
-- **Multi-device** — hub PC runs Telegram; other PCs run `--mode worker`; pick with `/use`
-- **Security** — owner-locked pairing, one-time `/invite` for friends, owner-only confirmations, shell/inbound gates, audit log, secret redaction
-- **Daily tools** — notes, todos, reminders (+ system/ADB/Steam/desktop tools)
+```
+Phone or PC browser (PWA)
+        │
+        ▼
+  Web hub on a PC   ←── you run this
+        │
+        ├── local tools (this machine)
+        └── workers on other PCs (optional)
+```
 
-## Modes
+- **Hub** (`--mode web`) — accounts, chat UI, agent, confirmations, reminders  
+- **Worker** (`--mode worker`) — extra PC that exposes tools to the hub  
+- First registered user is **owner**; others join with an **invite code** (or open signup)
 
-| Mode | Command | Role |
-|------|---------|------|
-| CLI | `python main.py` | Local console on this PC |
-| Telegram hub | `python main.py --mode telegram` | Phone control + device routing |
-| Both | `python main.py --mode both` | CLI + Telegram |
-| Worker | `python main.py --mode worker` | Expose this PC’s tools to the hub |
-
-## Quick start (one PC + phone)
+## Quick start
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-cp .env.example .env
-# set TELEGRAM_BOT_TOKEN, DEVICE_ID, DEVICE_NAME
-python main.py --mode telegram
+cd web && npm install && npm run build && cd ..
+cp .env.example .env   # optional OPENAI_API_KEY; users can also set keys in the app
+python main.py --mode web
 ```
 
-In Telegram:
+Open **http://\<pc-ip\>:8743** on the PC or phone (same Wi‑Fi).
 
-```text
-/whoami
-/pair <code-from-console>
-/apikey sk-...
-/model gpt-4o-mini
-What's on my todo list?
+Dev UI with hot reload:
+
+```bash
+# terminal 1
+python main.py --mode web --host 127.0.0.1 --port 8743
+# terminal 2
+cd web && npm run dev
+# open http://127.0.0.1:5174
 ```
 
-Put `TELEGRAM_OWNER_CHAT_ID=<your id>` into `.env` and restart.
+## For other people on your hub
 
-## Second device (friend’s PC or your laptop)
+1. Owner → Settings → **Create invite**  
+2. Friend opens the same URL → Join → paste invite → sets **their** API key  
+3. Friends get a limited tool set; dangerous actions ask **them** to confirm in the app
 
-On the **worker** PC:
+Open signup (no invite): `NEXUS_OPEN_SIGNUP=true` in `.env`.
+
+## Second PC
 
 ```env
 DEVICE_ID=laptop
@@ -58,58 +64,30 @@ WORKER_PORT=8765
 python main.py --mode worker
 ```
 
-On the **hub** (owner Telegram):
+In the web app → Devices → add `http://192.168.x.x:8765` + token → **Home** / **Use**.
 
-```text
-/device_add laptop "Home Laptop" http://192.168.x.x:8765 long-random-secret
-# or: /device_add laptop|Home Laptop|http://192.168.x.x:8765|long-random-secret
-/use laptop
-show system stats
-```
+## Modes
 
-Worker defaults to localhost; use `0.0.0.0` only on trusted LAN and keep the token secret. After you approve a dangerous tool (✅), it runs on the **selected** device (hub confirms, worker executes with `confirmed=true`).
+| Mode | Command |
+|------|---------|
+| Web hub (default) | `python main.py` or `--mode web` |
+| Worker | `python main.py --mode worker` |
+| CLI | `python main.py --mode cli` |
+| Legacy Telegram | `python main.py --mode telegram` |
 
-## Invite a friend (their own key, limited tools)
+## Security notes
 
-Owner:
-
-```text
-/invite sam
-```
-
-Friend (privately):
-
-```text
-/pair <invite-code>
-/apikey sk-friend-key
-```
-
-Friends cannot use `run_shell`, file push, steamcmd update, etc. Kill-process is owner-only. Dangerous actions still ask **you** (owner) for ✅/❌.
-
-## Daily tools
-
-`add_note` `list_notes` `add_todo` `list_todos` `complete_todo` `set_reminder` `list_reminders`
-
-Notes/todos/reminders are **per Telegram user** (`data/daily/users/<id>/`).  
-Reminders with a parseable time (`in 10 minutes`, ISO, `HH:MM`, `tomorrow 09:00`) are delivered as a Telegram ping while the hub is online.  
-`/home DEVICE_ID` sets the default device; `/use` is a session override.  
-Plus existing ADB / Cursor / Steam / system / desktop tools.
-
-## Security checklist
-
-1. Keep bot username private  
-2. Set `TELEGRAM_OWNER_CHAT_ID`  
-3. Prefer `/invite` over `/unlock`  
-4. Each person uses `/apikey` — then delete that Telegram message (bot tries to auto-delete). Keys live under `data/users/` in plaintext for now.  
-5. Worker tokens are long and unique; prefer LAN-only bind  
-6. Watch `/audit`
+- Bind `0.0.0.0` only on trusted LAN (or put behind VPN/Tailscale)  
+- Each user stores their own API key on the hub disk (`data/accounts.json`)  
+- Confirm dangerous tools in the app UI  
+- Prefer invite codes over open signup on shared networks  
 
 ## Layout
 
 ```
-main.py
-core/          agent, users (BYOK), devices, worker, pairing, safety, audit…
-tools/         plugins (auto-discovered)
-data/          users, devices, inbox, audit, daily notes (gitignored)
-scripts/       autostart helpers
+main.py          entrypoint
+core/            agent, accounts, web hub, devices, worker…
+tools/           LLM tools
+web/             React PWA (Vite + Tailwind)
+data/            accounts, devices, daily notes (gitignored)
 ```
