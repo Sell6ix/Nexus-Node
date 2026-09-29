@@ -1,0 +1,15 @@
+[Unit]
+Description=Nexus Node personal assistant (Telegram mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/nexus-node
+EnvironmentFile=-%h/nexus-node/.env
+ExecStart=%h/nexus-node/.venv/bin/python %h/nexus-node/main.py --mode telegram
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

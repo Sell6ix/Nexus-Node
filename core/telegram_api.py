@@ -150,6 +150,23 @@ class TelegramClient:
             raise TelegramAPIError(f"sendDocument failed: {parsed}")
         return parsed.get("result")
 
+    def get_file(self, file_id: str) -> dict[str, Any]:
+        return self.call("getFile", {"file_id": file_id})
+
+    def download_file(self, file_path: str, dest: Path) -> Path:
+        """Download a Bot API ``file_path`` (from getFile) to ``dest``."""
+        url = f"https://api.telegram.org/file/bot{self.bot_token}/{file_path}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with urllib.request.urlopen(url, timeout=self.timeout) as response:
+                dest.write_bytes(response.read())
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise TelegramAPIError(f"download_file HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise TelegramAPIError(f"download_file network error: {exc}") from exc
+        return dest
+
 
 def inline_confirm_keyboard(request_id: str) -> dict[str, Any]:
     """Build Yes/No inline keyboard for a confirmation request."""

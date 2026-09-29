@@ -27,6 +27,7 @@ from core.confirmation import (
     set_confirmation_gateway,
 )
 from core.registry import ToolRegistry
+from core.pairing import PairingStore
 from core.telegram_api import TelegramClient
 from core.telegram_bot import TelegramBot
 
@@ -100,7 +101,7 @@ def run_repl(agent: Agent) -> int:
                 "  exit     — quit\n"
                 "\n"
                 "Phone access: run `python main.py --mode telegram` on this PC,\n"
-                "then chat with your Telegram bot from the phone.\n"
+                "then send /pair CODE from Telegram (code is printed on start).\n"
             )
             continue
         if lowered == "tools":
@@ -200,6 +201,17 @@ def main(argv: list[str] | None = None) -> int:
     elif args.mode == "cli":
         set_confirmation_gateway(ConsoleGateway())
 
+    pairing: PairingStore | None = None
+    if args.mode in {"telegram", "both"}:
+        pairing = PairingStore(
+            data_dir=settings.data_dir,
+            env_pair_code=settings.telegram_pair_code,
+            seed_chat_ids=settings.allowed_telegram_chat_ids,
+        )
+        print(f"Telegram pair code: {pairing.pair_code}")
+        print(f"Paired chats file: {pairing.allowed_path}")
+        print(f"Inbound inbox: {settings.inbox_dir.resolve()}")
+
     bot: TelegramBot | None = None
     if args.mode in {"telegram", "both"}:
         bot = TelegramBot(
@@ -207,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
             registry,
             client=tg_client,
             shared_gateways=shared_gateways,
+            pairing=pairing,
         )
 
     if args.mode == "telegram":

@@ -8,46 +8,48 @@ Works from **the PC console** and from a **phone via Telegram** (same agent, sam
 
 - **Plugin tools** under `tools/` — auto-discovered, Pydantic v2 schemas, OpenAI function calling
 - **Two frontends** — local CLI (`--mode cli`) and Telegram long-polling bot (`--mode telegram` / `both`)
-- **Safety** — `@require_confirmation` for dangerous ops; console Y/N on PC, Telegram ✅/❌ buttons on phone
-- **Tools** — ADB, Cursor projects, Steam/gaming, system stats / process control / Telegram file pull
+- **Pairing** — phone chats must `/pair CODE` (code printed on the PC); allowlist persisted under `data/`
+- **Inbound media** — files / photos / voice from Telegram are saved to `data/inbox/`; voice can be transcribed with Whisper
+- **Safety** — `@require_confirmation` for dangerous ops; console Y/N on PC, Telegram ✅/❌ on phone
+- **Tools** — ADB, Cursor, Steam/gaming, system, desktop (files/URL/notify/shell)
 
 ## Layout
 
 ```
-main.py                 # CLI + Telegram entrypoint
-core/
-  agent.py              # OpenAI tool-calling loop
-  confirmation.py       # @require_confirmation + pluggable gateways
-  config.py             # env-based settings
-  registry.py           # @tool marker + auto-discovery
-  telegram_api.py       # thin Bot API client (stdlib)
-  telegram_bot.py       # phone interface (long polling)
-tools/
-  adb_tools.py
-  cursor_tools.py
-  gaming_tools.py
-  system_tools.py
+main.py
+core/                   # agent, confirmation, registry, telegram, pairing, inbound
+tools/                  # auto-discovered plugins
+scripts/                # autostart helpers (systemd / Scheduled Task)
+data/                   # pair code, allowlist, inbox (gitignored)
 requirements.txt
 .env.example
 ```
 
-## How phone + PC fit together
+## Phone + PC model
 
-The orchestrator **always runs on the PC** (it needs local access to processes, Steam, ADB, files).
+The orchestrator **always runs on the PC**.
 
 | You are on… | How you talk to it |
 |-------------|--------------------|
-| PC | `python main.py` (console REPL) |
-| Phone | `python main.py --mode telegram` on the PC, then chat with the bot in Telegram |
-| Both | `python main.py --mode both` — CLI locally, phone in parallel; dangerous ops can confirm via Telegram buttons |
+| PC | `python main.py` |
+| Phone | `python main.py --mode telegram` on the PC, then `/pair CODE` in Telegram |
+| Both | `python main.py --mode both` |
 
-## Requirements
+### Pairing
 
-- Python 3.11+
-- `OPENAI_API_KEY` for the agent
-- For phone access: a Telegram bot token from [@BotFather](https://t.me/BotFather)
+1. Start Telegram mode on the PC — console prints `Telegram pair code: ……`
+2. In Telegram, send `/pair AB12CD`
+3. Chat is stored in `data/allowed_chats.json`
 
-Optional binaries: `adb`, `cursor`, `steamcmd`, Steam client.
+Optional: set `TELEGRAM_CHAT_ID` / `TELEGRAM_ALLOWED_CHAT_IDS` or a fixed `TELEGRAM_PAIR_CODE` in `.env`.
+
+### Inbound from phone
+
+Send a document, photo, audio, or voice note:
+
+- Saved under `data/inbox/<chat_id>/<date>/…`
+- Voice/audio transcribed with OpenAI Whisper when `OPENAI_API_KEY` is set
+- Caption or transcript is forwarded to the agent (with the saved path attached)
 
 ## Setup
 
@@ -56,62 +58,60 @@ python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env
-# Edit .env — at minimum OPENAI_API_KEY
-# For phone: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID (or TELEGRAM_ALLOWED_CHAT_IDS)
+# Set OPENAI_API_KEY and TELEGRAM_BOT_TOKEN
 ```
-
-### Environment
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `OPENAI_API_KEY` | for chat | OpenAI API access |
+| `OPENAI_API_KEY` | for chat / whisper | OpenAI |
 | `OPENAI_MODEL` | no | Default `gpt-4o-mini` |
-| `TELEGRAM_BOT_TOKEN` | phone / backup | Bot API token |
-| `TELEGRAM_CHAT_ID` | recommended | Your chat id (backup target + allowlist) |
-| `TELEGRAM_ALLOWED_CHAT_IDS` | no | Comma-separated allowlist (extra chats) |
-| `CONFIRMATION_TIMEOUT_SECONDS` | no | Default `120` for Telegram Yes/No |
-| `ADB_PATH` / `CURSOR_CLI_PATH` / `STEAMCMD_PATH` | no | Binary overrides |
-| `STEAM_USERNAME` / `STEAM_PASSWORD` | no | Non-anonymous steamcmd |
-
-If Telegram secrets are missing, `send_telegram_backup` returns a **mock/local fallback**.
-
-**Finding your chat id:** start the bot with an open allowlist once, send `/status`, or use a helper like `@userinfobot`. Then put the id in `.env`.
+| `TELEGRAM_BOT_TOKEN` | phone | BotFather token |
+| `TELEGRAM_CHAT_ID` | no | Pre-seed allowlist + backup target |
+| `TELEGRAM_ALLOWED_CHAT_IDS` | no | Extra allowlist ids |
+| `TELEGRAM_PAIR_CODE` | no | Fixed pair code |
+| `NEXUS_INBOX_DIR` | no | Override inbound folder |
+| `CONFIRMATION_TIMEOUT_SECONDS` | no | Default `120` |
 
 ## Run
 
 ```bash
-# PC console
-python main.py
-
-# Phone remote control (run on the PC)
-python main.py --mode telegram
-
-# CLI + Telegram together
-python main.py --mode both
-
-# Single command
-python main.py -c "What's my CPU and memory usage?"
-
-# Inspect plugins (no API key needed)
+python main.py                      # PC console
+python main.py --mode telegram      # phone bot
+python main.py --mode both          # both
+python main.py -c "CPU usage?"
 python main.py --list-tools
-python main.py --dump-schemas
 ```
 
-Telegram slash commands: `/start` `/help` `/tools` `/reset` `/status`.
+Telegram commands: `/start` `/help` `/pair CODE` `/tools` `/reset` `/status` `/inbox`
+
+## Autostart (PC always listening for the phone)
+
+**Linux (systemd user):**
+
+```bash
+chmod +x scripts/install-autostart-linux.sh
+./scripts/install-autostart-linux.sh
+# logs: journalctl --user -u nexus-node.service -f
+```
+
+**Windows (Scheduled Task at logon):**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install-autostart-windows.ps1
+```
 
 ## Confirmation
 
-Dangerous tools (ADB push, project scaffold, steamcmd update, process kill) ask before running:
+Dangerous tools (ADB push, scaffold, steamcmd, `run_shell`, process kill, …) ask before running:
 
 - **CLI** — `Proceed? [y/N]`
-- **Telegram** — inline ✅ Yes / ❌ No (timeout denies)
+- **Telegram** — ✅ / ❌ (timeout = deny)
 
 ## Adding a tool
 
-1. Create or edit a module under `tools/`.
-2. Decorate with `@tool` (and `@require_confirmation` if dangerous).
-3. Use type annotations + an LLM-oriented docstring (`Args:` helps schemas).
-4. Restart — discovery is automatic.
+1. Add a function under `tools/` with `@tool` (+ `@require_confirmation` if dangerous).
+2. Type annotations + docstring with `Args:`.
+3. Restart — discovery is automatic.
 
 ## License
 

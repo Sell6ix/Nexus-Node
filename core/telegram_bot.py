@@ -9,6 +9,8 @@ from typing import Any
 from core.agent import Agent
 from core.config import Settings
 from core.confirmation import TelegramGateway, use_confirmation_gateway
+from core.inbound import extract_media, save_telegram_media, transcribe_audio_file
+from core.pairing import PairingStore
 from core.registry import ToolRegistry
 from core.telegram_api import TelegramAPIError, TelegramClient
 
@@ -16,14 +18,16 @@ from core.telegram_api import TelegramAPIError, TelegramClient
 HELP_TEXT = """\
 Nexus Node — remote PC assistant
 
-Send a normal message and I will run it on the host PC via tools.
+Send a text command, or drop a file / photo / voice note — it will be saved on the PC.
 
 Commands:
-/start  — welcome
-/help   — this help
-/tools  — list available tools
-/reset  — clear conversation memory
-/status — config / readiness check
+/start       — welcome
+/help        — this help
+/pair CODE   — link this chat (code is printed on the PC console)
+/tools       — list available tools
+/reset       — clear conversation memory
+/status      — PC online / config check
+/inbox       — show inbound save folder
 
 Dangerous actions ask for ✅ Yes / ❌ No buttons here in Telegram.
 """
@@ -39,6 +43,7 @@ class TelegramBot:
         *,
         client: TelegramClient | None = None,
         shared_gateways: dict[str, TelegramGateway] | None = None,
+        pairing: PairingStore | None = None,
     ) -> None:
         if not settings.telegram_bot_token:
             raise ValueError("TELEGRAM_BOT_TOKEN is required for Telegram mode")
@@ -46,12 +51,17 @@ class TelegramBot:
         self.settings = settings
         self.registry = registry
         self.client = client or TelegramClient(settings.telegram_bot_token)
-        self.allowed_chat_ids = {str(x) for x in settings.allowed_telegram_chat_ids}
+        self.pairing = pairing or PairingStore(
+            data_dir=settings.data_dir,
+            env_pair_code=settings.telegram_pair_code,
+            seed_chat_ids=settings.allowed_telegram_chat_ids,
+        )
         self._agents: dict[str, Agent] = {}
-        self._gateways: dict[str, TelegramGateway] = shared_gateways if shared_gateways is not None else {}
+        self._gateways: dict[str, TelegramGateway] = (
+            shared_gateways if shared_gateways is not None else {}
+        )
         self._stop = threading.Event()
         self._offset: int | None = None
-        self._bound_first_chat = bool(self.allowed_chat_ids)
 
     def stop(self) -> None:
         self._stop.set()
@@ -64,8 +74,9 @@ class TelegramBot:
     def run_forever(self) -> None:
         """Block and process updates until stop() or KeyboardInterrupt."""
         print("Telegram bot polling…")
-        allowed = sorted(self.allowed_chat_ids) or "(open — will bind to first chat that writes)"
-        print(f"Allowed chats: {allowed}")
+        print(f"Pair code: {self.pairing.pair_code}")
+        print(f"Paired chats: {sorted(self.pairing.allowed) or '(none yet — send /pair CODE)'}")
+        print(f"Inbox: {self.settings.inbox_dir}")
         print("Send a message to your bot from the phone or Telegram Desktop.\n")
 
         while not self._stop.is_set():
@@ -114,9 +125,7 @@ class TelegramBot:
             self._handle_message(message)
 
     def _chat_allowed(self, chat_id: int | str) -> bool:
-        if not self.allowed_chat_ids:
-            return True
-        return str(chat_id) in self.allowed_chat_ids
+        return self.pairing.is_allowed(chat_id)
 
     def _agent_for(self, chat_id: int | str) -> Agent:
         key = str(chat_id)
@@ -173,22 +182,32 @@ class TelegramBot:
     def _handle_message(self, message: dict[str, Any]) -> None:
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
-        text = (message.get("text") or "").strip()
-        if chat_id is None or not text:
+        if chat_id is None:
+            return
+
+        text = (message.get("text") or message.get("caption") or "").strip()
+        media = extract_media(message)
+
+        # Pairing is allowed before allowlist membership.
+        if text.lower().startswith("/pair"):
+            self._handle_pair(chat_id, text)
             return
 
         if not self._chat_allowed(chat_id):
             self.client.send_message(
                 chat_id,
-                "Access denied. Add this chat id to TELEGRAM_ALLOWED_CHAT_IDS "
-                "or TELEGRAM_CHAT_ID on the host.",
+                "This chat is not paired.\n"
+                "On the PC console, find the pair code, then send:\n"
+                "/pair YOURCODE",
             )
             return
 
-        if not self._bound_first_chat and not self.allowed_chat_ids:
-            self.allowed_chat_ids = {str(chat_id)}
-            self._bound_first_chat = True
-            print(f"Bound Telegram allowlist to first chat: {chat_id}")
+        if media is not None:
+            self._handle_inbound_media(chat_id, media, caption=text)
+            return
+
+        if not text:
+            return
 
         lowered = text.lower()
         if lowered in {"/start", "start"}:
@@ -206,17 +225,12 @@ class TelegramBot:
             self.client.send_message(chat_id, "Conversation reset.")
             return
         if lowered in {"/status", "status"}:
-            s = self.settings
+            self._send_status(chat_id)
+            return
+        if lowered in {"/inbox", "inbox"}:
             self.client.send_message(
                 chat_id,
-                "\n".join(
-                    [
-                        f"OpenAI: {'yes' if s.has_openai else 'NO'}",
-                        f"Model: {s.openai_model}",
-                        f"Tools: {len(self.registry)}",
-                        f"Chat: {chat_id}",
-                    ]
-                ),
+                f"Inbound folder on PC:\n{self.settings.inbox_dir.resolve()}",
             )
             return
 
@@ -224,6 +238,98 @@ class TelegramBot:
             self.client.send_message(chat_id, "Unknown command. Try /help.")
             return
 
+        self._run_agent(chat_id, text)
+
+    def _handle_pair(self, chat_id: int | str, text: str) -> None:
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            self.client.send_message(
+                chat_id,
+                "Usage: /pair CODE\nThe code is printed on the PC when the bot starts.",
+            )
+            return
+        code = parts[1].strip()
+        if self.pairing.try_pair(chat_id, code):
+            print(f"Paired Telegram chat: {chat_id}")
+            self.client.send_message(
+                chat_id,
+                f"Paired ✅ chat {chat_id}\nYou can now send commands, files, and voice notes.",
+            )
+            self.client.send_message(chat_id, HELP_TEXT)
+        else:
+            self.client.send_message(chat_id, "Invalid pair code. Check the PC console and retry.")
+
+    def _send_status(self, chat_id: int | str) -> None:
+        s = self.settings
+        self.client.send_message(
+            chat_id,
+            "\n".join(
+                [
+                    "PC online ✅",
+                    f"OpenAI: {'yes' if s.has_openai else 'NO'}",
+                    f"Model: {s.openai_model}",
+                    f"Tools: {len(self.registry)}",
+                    f"Chat: {chat_id}",
+                    f"Paired chats: {len(self.pairing.allowed)}",
+                    f"Inbox: {s.inbox_dir}",
+                ]
+            ),
+        )
+
+    def _handle_inbound_media(
+        self,
+        chat_id: int | str,
+        media: dict[str, Any],
+        *,
+        caption: str,
+    ) -> None:
+        self.client.send_message(chat_id, f"📥 Saving {media.get('kind')} to PC…")
+        saved = save_telegram_media(
+            self.client,
+            media,
+            inbox_dir=self.settings.inbox_dir,
+            chat_id=chat_id,
+        )
+        if not saved.get("ok"):
+            self.client.send_message(chat_id, f"Failed to save media: {saved.get('error')}")
+            return
+
+        lines = [
+            f"Saved ✅ ({saved.get('kind')})",
+            f"Path: {saved.get('path')}",
+            f"Size: {saved.get('size_bytes')} bytes",
+        ]
+
+        transcript = None
+        if saved.get("kind") in {"voice", "audio"}:
+            tr = transcribe_audio_file(
+                saved["path"],
+                api_key=self.settings.openai_api_key,
+            )
+            if tr.get("ok"):
+                transcript = tr.get("text") or ""
+                lines.append(f"Transcript: {transcript}")
+            elif tr.get("skipped"):
+                lines.append(str(tr.get("error")))
+            else:
+                lines.append(f"Transcription failed: {tr.get('error')}")
+
+        self.client.send_message(chat_id, "\n".join(lines))
+
+        # If the user attached a caption or we transcribed voice, run the agent.
+        follow_up = caption.strip()
+        if not follow_up and transcript:
+            follow_up = transcript
+        if follow_up:
+            # Tell the agent where the file landed so tools can use the path.
+            prompt = (
+                f"{follow_up}\n\n"
+                f"[Attached file saved on PC at: {saved.get('path')} "
+                f"(kind={saved.get('kind')})]"
+            )
+            self._run_agent(chat_id, prompt)
+
+    def _run_agent(self, chat_id: int | str, text: str) -> None:
         agent = self._agent_for(chat_id)
         gateway = self.gateway_for(chat_id)
         self.client.send_message(chat_id, "⏳ Working…")
