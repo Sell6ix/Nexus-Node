@@ -147,9 +147,9 @@ class Agent:
         if self.client is None:
             return (
                 "No AI API key configured for this user.\n"
-                "• Telegram: /apikey YOUR_KEY (optional /baseurl /model)\n"
-                "• Or set OPENAI_API_KEY in the host .env and restart.\n"
-                "OpenAI-compatible providers work via /baseurl."
+                "• Web app: Settings → paste your AI key (optional model / base URL).\n"
+                "• Telegram (legacy): /apikey YOUR_KEY (optional /baseurl /model).\n"
+                "• Or set OPENAI_API_KEY in the host .env and restart."
             )
 
         device = self._resolve_device()
