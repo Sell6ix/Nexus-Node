@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
-from core.confirmation import needs_confirmation
+from core.confirmation import needs_confirmation, tool_requires_confirmation
 from core.registry import ToolRegistry
 
 
@@ -36,24 +37,50 @@ class WorkerServer:
 
     def _authorized(self, handler: BaseHTTPRequestHandler) -> bool:
         header = handler.headers.get("Authorization") or ""
-        return header == f"Bearer {self.token}"
+        expected = f"Bearer {self.token}"
+        return hmac.compare_digest(header, expected)
 
-    def _execute(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _execute(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
         registered = self.registry.get(tool_name)
         if registered is None:
             return {"ok": False, "error": f"Unknown tool: {tool_name}"}
-        # Refuse tools that require interactive confirmation on the worker —
-        # confirm on the hub/owner chat, then run locally there for now.
-        if needs_confirmation(registered.func):
-            return {
-                "ok": False,
-                "error": (
-                    f"Tool '{tool_name}' requires confirmation and cannot be "
-                    "executed blindly on a worker. Use the hub/local device."
-                ),
-            }
         try:
             validated = registered.parse_arguments(arguments or {})
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"Invalid arguments: {exc}", "tool": tool_name}
+
+        # Dangerous tools: hub confirms first, then RPC with confirmed=true.
+        # Never prompt on the worker console (would hang headless workers).
+        if tool_requires_confirmation(tool_name, registered.func, validated):
+            if not confirmed:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Tool '{tool_name}' requires owner confirmation on the hub. "
+                        "Re-run after approval with confirmed=true."
+                    ),
+                    "requires_confirmation": True,
+                }
+            target = (
+                getattr(registered.func, "__wrapped__", registered.func)
+                if needs_confirmation(registered.func)
+                else registered.func
+            )
+            try:
+                result = target(**validated)
+                if isinstance(result, dict):
+                    return result
+                return {"ok": True, "result": result}
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "error": str(exc), "tool": tool_name}
+
+        try:
             result = registered.func(**validated)
             if isinstance(result, dict):
                 return result
@@ -111,13 +138,14 @@ class WorkerServer:
                     return
                 tool = str(body.get("tool") or "")
                 args = body.get("arguments") or {}
+                confirmed = bool(body.get("confirmed"))
                 if not tool:
                     self._send(400, {"ok": False, "error": "tool required"})
                     return
                 if not isinstance(args, dict):
                     self._send(400, {"ok": False, "error": "arguments must be object"})
                     return
-                result = worker._execute(tool, args)
+                result = worker._execute(tool, args, confirmed=confirmed)
                 self._send(200 if result.get("ok", True) else 200, result)
 
         self._httpd = ThreadingHTTPServer((self.host, self.port), Handler)

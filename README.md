@@ -61,12 +61,13 @@ python main.py --mode worker
 On the **hub** (owner Telegram):
 
 ```text
-/device_add laptop Laptop http://192.168.x.x:8765 long-random-secret
+/device_add laptop "Home Laptop" http://192.168.x.x:8765 long-random-secret
+# or: /device_add laptop|Home Laptop|http://192.168.x.x:8765|long-random-secret
 /use laptop
 show system stats
 ```
 
-Worker defaults to localhost; use `0.0.0.0` only on trusted LAN and keep the token secret. Dangerous confirmed tools still run on the hub for now.
+Worker defaults to localhost; use `0.0.0.0` only on trusted LAN and keep the token secret. After you approve a dangerous tool (✅), it runs on the **selected** device (hub confirms, worker executes with `confirmed=true`).
 
 ## Invite a friend (their own key, limited tools)
 
@@ -89,6 +90,7 @@ Friends cannot use `run_shell`, file push, steamcmd update, etc. Kill-process is
 
 `add_note` `list_notes` `add_todo` `list_todos` `complete_todo` `set_reminder` `list_reminders`
 
+Notes/todos/reminders are **per Telegram user** (`data/daily/users/<id>/`).  
 Plus existing ADB / Cursor / Steam / system / desktop tools.
 
 ## Security checklist
@@ -96,7 +98,7 @@ Plus existing ADB / Cursor / Steam / system / desktop tools.
 1. Keep bot username private  
 2. Set `TELEGRAM_OWNER_CHAT_ID`  
 3. Prefer `/invite` over `/unlock`  
-4. Each person uses `/apikey` (keys stored under `data/users/`, never shared)  
+4. Each person uses `/apikey` — then delete that Telegram message (bot tries to auto-delete). Keys live under `data/users/` in plaintext for now.  
 5. Worker tokens are long and unique; prefer LAN-only bind  
 6. Watch `/audit`
 

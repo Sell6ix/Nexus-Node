@@ -112,6 +112,13 @@ class TelegramClient:
             payload["reply_markup"] = reply_markup
         return self.call("editMessageReplyMarkup", payload)
 
+    def delete_message(self, chat_id: int | str, message_id: int) -> dict[str, Any]:
+        """Best-effort delete (used to scrub /apikey messages from chat history)."""
+        return self.call(
+            "deleteMessage",
+            {"chat_id": chat_id, "message_id": message_id},
+        )
+
     def send_document(self, chat_id: int | str, file_path: str | Path) -> dict[str, Any]:
         """Upload a local file as a document (multipart/form-data)."""
         path = Path(file_path)

@@ -1,4 +1,4 @@
-"""Everyday productivity tools: notes, todos, reminders."""
+"""Everyday productivity tools: notes, todos, reminders (per-user)."""
 
 from __future__ import annotations
 
@@ -8,28 +8,30 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from core.context import get_user_id
 from core.registry import tool
 
-_DATA = Path(__file__).resolve().parent.parent / "data" / "daily"
+_ROOT = Path(__file__).resolve().parent.parent / "data" / "daily"
 
 
-def _ensure() -> None:
-    _DATA.mkdir(parents=True, exist_ok=True)
+def _user_dir() -> Path:
+    # Isolate each Telegram/CLI user so friends don't share lists.
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in get_user_id())
+    path = _ROOT / "users" / (safe or "local")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _notes_path() -> Path:
-    _ensure()
-    return _DATA / "notes.json"
+    return _user_dir() / "notes.json"
 
 
 def _todos_path() -> Path:
-    _ensure()
-    return _DATA / "todos.json"
+    return _user_dir() / "todos.json"
 
 
 def _reminders_path() -> Path:
-    _ensure()
-    return _DATA / "reminders.json"
+    return _user_dir() / "reminders.json"
 
 
 def _load(path: Path) -> list[dict[str, Any]]:
@@ -48,7 +50,7 @@ def _save(path: Path, rows: list[dict[str, Any]]) -> None:
 
 @tool
 def add_note(text: str, tags: str = "") -> dict[str, Any]:
-    """Save a short personal note on this device.
+    """Save a short personal note for the current user.
 
     Args:
         text: Note body.
@@ -67,6 +69,7 @@ def add_note(text: str, tags: str = "") -> dict[str, Any]:
             "text": body,
             "tags": [t.strip() for t in tags.split(",") if t.strip()],
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "user_id": get_user_id(),
         }
         rows.append(note)
         _save(_notes_path(), rows[-500:])
@@ -77,7 +80,7 @@ def add_note(text: str, tags: str = "") -> dict[str, Any]:
 
 @tool
 def list_notes(limit: int = 20, query: str = "") -> dict[str, Any]:
-    """List recent notes, optionally filtered by substring.
+    """List recent notes for the current user, optionally filtered.
 
     Args:
         limit: Max notes to return (default 20).
@@ -91,14 +94,15 @@ def list_notes(limit: int = 20, query: str = "") -> dict[str, Any]:
         q = query.strip().lower()
         if q:
             rows = [n for n in rows if q in str(n.get("text", "")).lower()]
-        return {"ok": True, "count": len(rows[: max(1, min(limit, 100))]), "notes": rows[: max(1, min(limit, 100))]}
+        limit_i = max(1, min(int(limit), 100))
+        return {"ok": True, "user_id": get_user_id(), "count": len(rows[:limit_i]), "notes": rows[:limit_i]}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
 
 
 @tool
 def add_todo(title: str, due: str = "") -> dict[str, Any]:
-    """Add a todo item on this device.
+    """Add a todo item for the current user.
 
     Args:
         title: What to do.
@@ -118,6 +122,7 @@ def add_todo(title: str, due: str = "") -> dict[str, Any]:
             "due": due.strip() or None,
             "done": False,
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "user_id": get_user_id(),
         }
         rows.append(item)
         _save(_todos_path(), rows[-500:])
@@ -128,7 +133,7 @@ def add_todo(title: str, due: str = "") -> dict[str, Any]:
 
 @tool
 def list_todos(include_done: bool = False) -> dict[str, Any]:
-    """List todos on this device.
+    """List todos for the current user.
 
     Args:
         include_done: Include completed items (default false).
@@ -140,14 +145,14 @@ def list_todos(include_done: bool = False) -> dict[str, Any]:
         rows = _load(_todos_path())
         if not include_done:
             rows = [t for t in rows if not t.get("done")]
-        return {"ok": True, "count": len(rows), "todos": rows[-100:]}
+        return {"ok": True, "user_id": get_user_id(), "count": len(rows), "todos": rows[-100:]}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
 
 
 @tool
 def complete_todo(todo_id: str) -> dict[str, Any]:
-    """Mark a todo as done by id.
+    """Mark a todo as done by id (current user only).
 
     Args:
         todo_id: Todo id from list_todos / add_todo.
@@ -170,15 +175,14 @@ def complete_todo(todo_id: str) -> dict[str, Any]:
 
 @tool
 def set_reminder(text: str, when: str) -> dict[str, Any]:
-    """Store a reminder note on this device (local list; not a push scheduler).
+    """Store a reminder for the current user (local list; not a push scheduler yet).
 
     Args:
         text: Reminder text.
         when: When to remember (free text or ISO datetime).
 
     Returns:
-        The stored reminder. The assistant should also mention it in replies;
-        OS push scheduling is not guaranteed.
+        The stored reminder.
     """
     try:
         body = text.strip()
@@ -191,13 +195,14 @@ def set_reminder(text: str, when: str) -> dict[str, Any]:
             "when": when.strip(),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "done": False,
+            "user_id": get_user_id(),
         }
         rows.append(item)
         _save(_reminders_path(), rows[-500:])
         return {
             "ok": True,
             "reminder": item,
-            "note": "Stored locally. For phone push, ask the hub to send a Telegram message at that time (manual/cron).",
+            "note": "Stored for this user only. Push/cron delivery is not automatic yet.",
         }
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
@@ -205,7 +210,7 @@ def set_reminder(text: str, when: str) -> dict[str, Any]:
 
 @tool
 def list_reminders(include_done: bool = False) -> dict[str, Any]:
-    """List stored reminders on this device.
+    """List reminders for the current user.
 
     Args:
         include_done: Include completed reminders.
@@ -217,6 +222,11 @@ def list_reminders(include_done: bool = False) -> dict[str, Any]:
         rows = _load(_reminders_path())
         if not include_done:
             rows = [r for r in rows if not r.get("done")]
-        return {"ok": True, "count": len(rows), "reminders": rows[-100:]}
+        return {
+            "ok": True,
+            "user_id": get_user_id(),
+            "count": len(rows),
+            "reminders": rows[-100:],
+        }
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}

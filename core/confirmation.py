@@ -184,14 +184,37 @@ def needs_confirmation(func: Callable[..., Any]) -> bool:
     return bool(getattr(func, ATTR_REQUIRES_CONFIRMATION, False))
 
 
+def tool_requires_confirmation(
+    tool_name: str,
+    func: Callable[..., Any],
+    arguments: dict[str, Any] | None = None,
+) -> bool:
+    """Whether the agent must confirm before running this tool call.
+
+    Covers ``@require_confirmation`` tools plus argument-dependent cases
+    such as ``manage_process(action=\"kill\")``.
+    """
+    if needs_confirmation(func):
+        return True
+    if tool_name == "manage_process":
+        action = str((arguments or {}).get("action") or "check").lower()
+        return action == "kill"
+    return False
+
+
 def confirmation_message_for(
     func: Callable[..., Any],
     arguments: dict[str, Any],
+    *,
+    tool_name: str | None = None,
 ) -> str:
+    name = tool_name or getattr(func, "__name__", "")
+    if name == "manage_process" and str(arguments.get("action") or "check").lower() == "kill":
+        return "Kill matching OS processes? This can disrupt running applications."
     custom = getattr(func, ATTR_CONFIRMATION_MESSAGE, None)
     if custom:
         return custom
-    return _default_prompt(func.__name__, arguments)
+    return _default_prompt(name or "tool", arguments)
 
 
 def uses_telegram_button_hook(func: Callable[..., Any]) -> bool:

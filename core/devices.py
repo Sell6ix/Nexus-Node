@@ -138,16 +138,26 @@ def execute_remote_tool(
     tool_name: str,
     arguments: dict[str, Any],
     *,
+    confirmed: bool = False,
     timeout: float = 120.0,
 ) -> dict[str, Any]:
-    """Call a worker device's ``/v1/tools/execute`` endpoint."""
+    """Call a worker device's ``/v1/tools/execute`` endpoint.
+
+    Pass ``confirmed=True`` only after the hub owner approved a dangerous tool.
+    """
     if device.is_local:
         return {"ok": False, "error": "Device is local; use in-process execution."}
     if not device.token:
         return {"ok": False, "error": f"Device {device.id} has no auth token configured."}
 
     url = device.base_url.rstrip("/") + "/v1/tools/execute"  # type: ignore[union-attr]
-    body = json.dumps({"tool": tool_name, "arguments": arguments or {}}).encode("utf-8")
+    body = json.dumps(
+        {
+            "tool": tool_name,
+            "arguments": arguments or {},
+            "confirmed": bool(confirmed),
+        }
+    ).encode("utf-8")
     request = urllib.request.Request(
         url,
         data=body,

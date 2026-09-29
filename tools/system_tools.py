@@ -9,14 +9,13 @@ from typing import Any, Literal
 import psutil
 
 from core.config import load_settings
-from core.confirmation import ConfirmationDenied, confirm_action
+from core.confirmation import require_confirmation
 from core.registry import tool
 
 ProcessAction = Literal["check", "kill"]
 
 
 def _primary_disk_path() -> str:
-    """Pick a sensible disk root for the current OS."""
     if os.name == "nt":
         return os.environ.get("SystemDrive", "C:") + "\\"
     return "/"
@@ -77,53 +76,101 @@ def get_system_stats() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
+def _find_processes(process_name: str) -> tuple[list[psutil.Process], list[dict[str, Any]]]:
+    needle = process_name.lower().strip()
+    matches: list[psutil.Process] = []
+    summaries: list[dict[str, Any]] = []
+    if not needle:
+        return matches, summaries
+    for proc in psutil.process_iter(["pid", "name", "exe", "status"]):
+        try:
+            info = proc.info
+            name = (info.get("name") or "").lower()
+            exe = (info.get("exe") or "").lower()
+            if needle in name or needle in exe.split("/")[-1].split("\\")[-1]:
+                matches.append(proc)
+                summaries.append(
+                    {
+                        "pid": info.get("pid"),
+                        "name": info.get("name"),
+                        "exe": info.get("exe"),
+                        "status": info.get("status"),
+                    }
+                )
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return matches, summaries
+
+
+def _kill_matching_processes(process_name: str) -> dict[str, Any]:
+    """Terminate matching processes (no confirmation — caller must gate)."""
+    needle = process_name.lower().strip()
+    if not needle:
+        return {"ok": False, "error": "process_name must not be empty."}
+    matches, summaries = _find_processes(process_name)
+    results: list[dict[str, Any]] = []
+    for proc, summary in zip(matches, summaries, strict=False):
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+                results.append({**summary, "killed": True, "method": "terminate"})
+            except psutil.TimeoutExpired:
+                proc.kill()
+                results.append({**summary, "killed": True, "method": "kill"})
+        except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
+            results.append({**summary, "killed": False, "error": str(exc)})
+    return {
+        "ok": True,
+        "action": "kill",
+        "process_name": process_name,
+        "results": results,
+    }
+
+
+@tool
+@require_confirmation(
+    "Kill matching OS processes? This can disrupt running applications."
+)
+def kill_process(process_name: str) -> dict[str, Any]:
+    """Terminate processes by name on this device. Requires confirmation.
+
+    Args:
+        process_name: Process name substring to match (case-insensitive).
+
+    Returns:
+        Termination results per matched process.
+    """
+    try:
+        return _kill_matching_processes(process_name)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "process_name": process_name}
+
+
 @tool
 def manage_process(
     process_name: str,
     action: ProcessAction = "check",
 ) -> dict[str, Any]:
-    """Check or kill processes by name on the host PC.
+    """Check or kill processes by name on this device.
 
-    Use action="check" (default) to list matching processes.
-    Use action="kill" to terminate matches — requires confirmation
-    (console on PC, Telegram Yes/No buttons from phone).
+    Use action="check" (default) to list matches.
+    Prefer kill_process for termination; action="kill" still requires owner
+    confirmation via the agent before execution (local or remote).
 
     Args:
         process_name: Process name substring to match (case-insensitive).
         action: "check" to inspect, or "kill" to terminate matching processes.
 
     Returns:
-        A dict with matches and, for kill, termination results.
+        A dict with matches or kill results.
     """
     try:
-        if action not in {"check", "kill"}:
-            return {"ok": False, "error": f"Unsupported action: {action}"}
-
-        needle = process_name.lower().strip()
-        if not needle:
-            return {"ok": False, "error": "process_name must not be empty."}
-
-        matches: list[psutil.Process] = []
-        summaries: list[dict[str, Any]] = []
-        for proc in psutil.process_iter(["pid", "name", "exe", "status"]):
-            try:
-                info = proc.info
-                name = (info.get("name") or "").lower()
-                exe = (info.get("exe") or "").lower()
-                if needle in name or needle in exe.split("/")[-1].split("\\")[-1]:
-                    matches.append(proc)
-                    summaries.append(
-                        {
-                            "pid": info.get("pid"),
-                            "name": info.get("name"),
-                            "exe": info.get("exe"),
-                            "status": info.get("status"),
-                        }
-                    )
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-
         if action == "check":
+            needle = process_name.lower().strip()
+            if not needle:
+                return {"ok": False, "error": "process_name must not be empty."}
+            _, summaries = _find_processes(process_name)
             return {
                 "ok": True,
                 "action": "check",
@@ -131,37 +178,11 @@ def manage_process(
                 "match_count": len(summaries),
                 "matches": summaries[:50],
             }
-
-        prompt = (
-            f"Kill {len(summaries)} process(es) matching {process_name!r}? "
-            f"pids={[s['pid'] for s in summaries[:20]]}"
-        )
-        if not confirm_action(prompt, use_telegram_stub=True):
-            raise ConfirmationDenied(
-                f"User denied confirmation to kill processes matching {process_name!r}."
-            )
-
-        results: list[dict[str, Any]] = []
-        for proc, summary in zip(matches, summaries, strict=False):
-            try:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                    results.append({**summary, "killed": True, "method": "terminate"})
-                except psutil.TimeoutExpired:
-                    proc.kill()
-                    results.append({**summary, "killed": True, "method": "kill"})
-            except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
-                results.append({**summary, "killed": False, "error": str(exc)})
-
-        return {
-            "ok": True,
-            "action": "kill",
-            "process_name": process_name,
-            "results": results,
-        }
-    except ConfirmationDenied as exc:
-        return {"ok": False, "error": str(exc), "process_name": process_name, "action": action}
+        if action == "kill":
+            # No decorator here — agent/worker enforce confirmation, then call
+            # the bare kill implementation (avoids double prompts / worker hang).
+            return _kill_matching_processes(process_name)
+        return {"ok": False, "error": f"Unsupported action: {action}"}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc), "process_name": process_name, "action": action}
 
@@ -173,7 +194,6 @@ def send_telegram_backup(file_path: str) -> dict[str, Any]:
     Uses TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from the environment.
     If secrets are missing, returns a clear mock/local fallback result instead
     of failing hard — useful for offline demos.
-    From phone, this is a good way to pull a file off the PC.
 
     Args:
         file_path: Path to the file on the host PC to upload as a Telegram document.

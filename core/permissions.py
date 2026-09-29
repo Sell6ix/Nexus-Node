@@ -92,6 +92,12 @@ def check_tool_permission(
             "error": f"Tool '{tool_name}' is not allowed for friends.",
             "blocked_by": "friend_allow",
         }
+    if tool_name == "kill_process" and not policy.friend_can_kill_process:
+        return {
+            "ok": False,
+            "error": "Friends cannot kill processes (owner-only).",
+            "blocked_by": "friend_kill",
+        }
     if tool_name == "manage_process":
         action = str(arguments.get("action") or "check").lower()
         if action == "kill" and not policy.friend_can_kill_process:

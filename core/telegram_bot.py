@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import threading
 import time
 from contextlib import nullcontext
@@ -11,6 +12,7 @@ from core.agent import Agent
 from core.audit import get_audit_logger
 from core.config import Settings
 from core.confirmation import TelegramGateway, use_confirmation_gateway
+from core.context import request_context
 from core.devices import DeviceRegistry, ping_device
 from core.inbound import extract_media, save_telegram_media, transcribe_audio_file
 from core.pairing import PairResult, PairingStore
@@ -27,7 +29,7 @@ Each person uses their own AI key. Commands can target different devices.
 
 Setup (you):
 /whoami
-/apikey YOUR_KEY
+/apikey YOUR_KEY   ⚠️ then delete that message
 /model gpt-4o-mini
 /baseurl https://api.openai.com/v1   (optional, any OpenAI-compatible API)
 /pair CODE   (first time — code is on the PC console)
@@ -35,8 +37,9 @@ Setup (you):
 Devices:
 /devices
 /use DEVICE_ID
-/device_add ID NAME URL TOKEN   (owner)
-/device_del ID                  (owner)
+/device_add ID "Name With Spaces" URL TOKEN   (owner, quotes OK)
+/device_add ID|Name|URL|TOKEN                 (owner, pipe form)
+/device_del ID                                (owner)
 
 Friends:
 /invite [label]   — one-time code for a friend (owner)
@@ -45,6 +48,12 @@ Friends:
 
 Other: /tools /status /inbox /audit /reset /help
 """
+
+APIKEY_WARNING = (
+    "⚠️ Security: your API key will appear in Telegram chat history "
+    "(and possibly cloud backups). After sending, delete that message. "
+    "Prefer a restricted/rotated key."
+)
 
 
 class TelegramBot:
@@ -266,9 +275,11 @@ class TelegramBot:
             self.client.send_message(chat_id, "Unauthorized.")
             return
 
+        message_id = message.get("message_id")
+
         # Config / BYOK
         if lowered.startswith("/apikey"):
-            self._cmd_apikey(chat_id, text)
+            self._cmd_apikey(chat_id, text, message_id=message_id)
             return
         if lowered.startswith("/baseurl"):
             self._cmd_baseurl(chat_id, text)
@@ -396,20 +407,50 @@ class TelegramBot:
 
         self._run_agent(chat_id, text)
 
-    def _cmd_apikey(self, chat_id: int | str, text: str) -> None:
+    def _cmd_apikey(
+        self,
+        chat_id: int | str,
+        text: str,
+        *,
+        message_id: int | None = None,
+    ) -> None:
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            self.client.send_message(chat_id, "Usage: /apikey sk-...  (or /apikey clear)")
+            self.client.send_message(
+                chat_id,
+                "Usage: /apikey sk-...  (or /apikey clear)\n\n" + APIKEY_WARNING,
+            )
             return
         value = parts[1].strip()
-        if value.lower() == "clear":
+        cleared = value.lower() == "clear"
+        if cleared:
             self.users.set_api_key(chat_id, None)
         else:
             self.users.set_api_key(chat_id, value)
         self._invalidate_agent(chat_id)
-        # Try hard to avoid echoing secrets back.
-        self.client.send_message(chat_id, "API key saved for your profile only (not shared).")
-        self.audit.log("user_apikey_set", chat_id=chat_id, cleared=value.lower() == "clear")
+        # Best-effort scrub of the secret-bearing user message.
+        deleted = False
+        if message_id is not None and not cleared:
+            try:
+                self.client.delete_message(chat_id, int(message_id))
+                deleted = True
+            except TelegramAPIError:
+                deleted = False
+        if cleared:
+            self.client.send_message(chat_id, "API key cleared for your profile.")
+        else:
+            scrub = (
+                "Your /apikey message was deleted from this chat."
+                if deleted
+                else "Could not auto-delete your /apikey message — delete it yourself."
+            )
+            self.client.send_message(
+                chat_id,
+                "API key saved for your profile only (not shared).\n"
+                f"{scrub}\n"
+                "Keys remain recoverable from Telegram backups if the message stays.",
+            )
+        self.audit.log("user_apikey_set", chat_id=chat_id, cleared=cleared, scrubbed=deleted)
 
     def _cmd_baseurl(self, chat_id: int | str, text: str) -> None:
         parts = text.split(maxsplit=1)
@@ -468,24 +509,26 @@ class TelegramBot:
         if not self.pairing.is_owner(chat_id):
             self.client.send_message(chat_id, "Owner only.")
             return
-        # /device_add id name url token
-        parts = text.split(maxsplit=4)
-        if len(parts) < 5:
+        parsed = _parse_device_add(text)
+        if parsed is None:
             self.client.send_message(
                 chat_id,
-                "Usage: /device_add ID NAME URL TOKEN\n"
+                "Usage:\n"
+                "• /device_add ID NAME URL TOKEN\n"
+                "• /device_add ID \"Name With Spaces\" URL TOKEN\n"
+                "• /device_add ID|Name With Spaces|URL|TOKEN\n"
                 "Example: /device_add laptop \"Home Laptop\" http://192.168.1.20:8765 secrettoken",
             )
             return
-        _, device_id, name, url, token = parts
+        device_id, name, url, token = parsed
         self.devices.upsert(
             device_id,
-            name=name.strip("\"'"),
+            name=name,
             base_url=url,
             token=token,
             owner_chat_id=str(chat_id),
         )
-        self.client.send_message(chat_id, f"Device saved: {device_id}")
+        self.client.send_message(chat_id, f"Device saved: {device_id} ({name})")
 
     def _cmd_device_del(self, chat_id: int | str, text: str) -> None:
         if not self.pairing.is_owner(chat_id):
@@ -650,11 +693,49 @@ class TelegramBot:
     def _run_agent(self, chat_id: int | str, text: str) -> None:
         agent = self._agent_for(chat_id)
         gateway = self.owner_gateway()
+        profile = self.users.get(chat_id)
+        device_id = profile.active_device_id or self.devices.local_id
         self.client.send_message(chat_id, "⏳ Working…")
-        context = use_confirmation_gateway(gateway) if gateway else nullcontext()
-        with context:
+        confirm_ctx = use_confirmation_gateway(gateway) if gateway else nullcontext()
+        with request_context(user_id=str(chat_id), device_id=device_id), confirm_ctx:
             try:
                 reply = agent.run(text)
             except Exception as exc:  # noqa: BLE001
                 reply = f"Error: {redact_secrets(str(exc))}"
         self.client.send_message(chat_id, reply or "(empty reply)")
+
+
+def _parse_device_add(text: str) -> tuple[str, str, str, str] | None:
+    """Parse ``/device_add`` args: shlex tokens or ``id|name|url|token``."""
+    raw = text.strip()
+    # Drop the command token (/device_add or /device_add@BotName).
+    first, _, rest = raw.partition(" ")
+    if not rest.strip():
+        # Entire payload may be pipe-form without spaces after command.
+        if "|" in first:
+            # e.g. uncommon: /device_add|id|name|url|token — ignore
+            return None
+        return None
+    rest = rest.strip()
+    if rest.count("|") >= 3:
+        parts = [p.strip() for p in rest.split("|", 3)]
+        if len(parts) == 4 and all(parts):
+            return parts[0], parts[1], parts[2], parts[3]
+        return None
+    try:
+        tokens = shlex.split(rest)
+    except ValueError:
+        return None
+    if len(tokens) < 4:
+        return None
+    # id, name (may be multi-token if user forgot quotes — join middle), url, token
+    if len(tokens) == 4:
+        return tokens[0], tokens[1], tokens[2], tokens[3]
+    # Extra tokens: treat last two as url/token, middle as name.
+    device_id = tokens[0]
+    token = tokens[-1]
+    url = tokens[-2]
+    name = " ".join(tokens[1:-2]).strip()
+    if not (device_id and name and url and token):
+        return None
+    return device_id, name, url, token

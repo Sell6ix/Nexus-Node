@@ -15,8 +15,10 @@ from core.confirmation import (
     confirmation_message_for,
     confirm_action,
     needs_confirmation,
+    tool_requires_confirmation,
     uses_telegram_button_hook,
 )
+from core.context import request_context
 from core.devices import Device, DeviceRegistry, execute_remote_tool
 from core.permissions import PermissionPolicy, Role, check_tool_permission
 from core.registry import ToolRegistry
@@ -36,6 +38,7 @@ AUDITED_TOOLS = frozenset(
     {
         "run_shell",
         "manage_process",
+        "kill_process",
         "adb_push_file",
         "create_project_structure",
         "update_game_via_steamcmd",
@@ -140,6 +143,14 @@ class Agent:
                 "OpenAI-compatible providers work via /baseurl."
             )
 
+        device = self._resolve_device()
+        with request_context(
+            user_id=str(self.requester_id),
+            device_id=device.id if device else self.active_device_id,
+        ):
+            return self._run_inner(user_command, max_tool_rounds=max_tool_rounds)
+
+    def _run_inner(self, user_command: str, *, max_tool_rounds: int = 8) -> str:
         self._messages.append({"role": "user", "content": user_command})
         tools = self._tools_for_role()
         self.audit.log(
@@ -246,7 +257,8 @@ class Agent:
             )
             return json.dumps({"ok": False, "error": perm.get("error"), "tool": name})
 
-        should_audit = name in AUDITED_TOOLS or needs_confirmation(registered.func)
+        requires_confirm = tool_requires_confirmation(name, registered.func, validated)
+        should_audit = name in AUDITED_TOOLS or requires_confirm
         if should_audit:
             self.audit.log(
                 "tool_call",
@@ -270,16 +282,21 @@ class Agent:
 
         func = registered.func
         device = self._resolve_device()
+        remote = device is not None and not device.is_local
 
-        if needs_confirmation(func):
-            prompt = confirmation_message_for(func, validated)
+        if requires_confirm:
+            prompt = confirmation_message_for(func, validated, tool_name=name)
             detailed = (
                 f"{prompt}\n\n"
                 f"Requested by: {self.requester_id} (role={self.role.value})\n"
-                f"Device: {device.id if device else 'local'}\n"
+                f"Device: {device.id if device else 'local'}"
+                f"{' (remote)' if remote else ''}\n"
                 f"Tool: {name}\nArgs: {json.dumps(validated, default=str)}"
             )
-            allowed = self.confirm_fn(detailed, uses_telegram_button_hook(func))
+            allowed = self.confirm_fn(
+                detailed,
+                uses_telegram_button_hook(func) if needs_confirmation(func) else True,
+            )
             if not allowed:
                 self.audit.log(
                     "confirmation_denied",
@@ -290,18 +307,27 @@ class Agent:
                 return json.dumps(
                     {"ok": False, "error": "User denied confirmation.", "tool": name}
                 )
-            # Confirmed dangerous tools currently execute on the hub/local process only.
-            target = getattr(func, "__wrapped__", func)
             try:
-                result = target(**validated)
+                if remote:
+                    # Hub already confirmed — execute on the selected worker.
+                    result = execute_remote_tool(
+                        device, name, validated, confirmed=True  # type: ignore[arg-type]
+                    )
+                else:
+                    # Unwrap @require_confirmation to avoid a second local prompt.
+                    target = (
+                        getattr(func, "__wrapped__", func)
+                        if needs_confirmation(func)
+                        else func
+                    )
+                    result = target(**validated)
             except Exception as exc:  # noqa: BLE001
                 self.audit.log("tool_error", source=self.source, tool=name, error=str(exc))
                 return json.dumps({"ok": False, "error": str(exc), "tool": name})
         else:
             try:
-                if device is not None and not device.is_local:
-                    remote = execute_remote_tool(device, name, validated)
-                    result = remote
+                if remote:
+                    result = execute_remote_tool(device, name, validated)  # type: ignore[arg-type]
                 else:
                     result = func(**validated)
             except ConfirmationDenied as exc:
