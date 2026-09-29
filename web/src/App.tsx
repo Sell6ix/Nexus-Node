@@ -18,6 +18,7 @@ export default function App() {
   ])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [authBusy, setAuthBusy] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmReq | null>(null)
   const [toast, setToast] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -86,6 +87,11 @@ export default function App() {
     fields: { username: string; password: string; display_name?: string; invite_code?: string },
   ) {
     setError('')
+    if (!fields.username.trim() || !fields.password) {
+      setError('Enter username and password.')
+      return
+    }
+    setAuthBusy(true)
     try {
       const res = mode === 'login' ? await api.login(fields) : await api.register(fields)
       setToken(res.token)
@@ -93,6 +99,8 @@ export default function App() {
       setBoot('app')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Auth failed')
+    } finally {
+      setAuthBusy(false)
     }
   }
 
@@ -147,6 +155,7 @@ export default function App() {
       <AuthScreen
         health={health}
         error={error}
+        busy={authBusy}
         onAuth={onAuth}
       />
     )
@@ -286,10 +295,12 @@ function Bubble({ msg }: { msg: Msg }) {
 function AuthScreen({
   health,
   error,
+  busy,
   onAuth,
 }: {
   health: { has_owner: boolean; open_signup: boolean; device: string } | null
   error: string
+  busy: boolean
   onAuth: (
     mode: 'login' | 'register',
     fields: { username: string; password: string; display_name?: string; invite_code?: string },
@@ -297,14 +308,31 @@ function AuthScreen({
 }) {
   const firstOwner = health ? !health.has_owner : true
   const [mode, setMode] = useState<'login' | 'register'>(firstOwner ? 'register' : 'login')
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
-  const [displayName, setDisplayName] = useState('')
-  const [invite, setInvite] = useState('')
+  const formRef = useRef<HTMLFormElement>(null)
 
   useEffect(() => {
     if (firstOwner) setMode('register')
   }, [firstOwner])
+
+  function readFields(): {
+    username: string
+    password: string
+    display_name?: string
+    invite_code?: string
+  } {
+    // Prefer FormData so browser autofill (which may skip React onChange) still works.
+    const fd = formRef.current ? new FormData(formRef.current) : null
+    const username = String(fd?.get('username') || '').trim()
+    const password = String(fd?.get('password') || '')
+    const display_name = String(fd?.get('display_name') || '').trim()
+    const invite_code = String(fd?.get('invite_code') || '').trim()
+    return {
+      username,
+      password,
+      display_name: display_name || undefined,
+      invite_code: invite_code || undefined,
+    }
+  }
 
   return (
     <div className="min-h-dvh flex flex-col justify-center px-4 py-10">
@@ -320,15 +348,11 @@ function AuthScreen({
         </div>
 
         <form
+          ref={formRef}
           className="rounded-3xl border border-[var(--line)] bg-[var(--panel)]/90 p-5 space-y-3"
           onSubmit={(e) => {
             e.preventDefault()
-            void onAuth(mode, {
-              username,
-              password,
-              display_name: displayName,
-              invite_code: invite || undefined,
-            })
+            void onAuth(mode, readFields())
           }}
         >
           <div className="flex gap-2 mb-2">
@@ -349,26 +373,37 @@ function AuthScreen({
           </div>
 
           {mode === 'register' && (
-            <Field label="Display name" value={displayName} onChange={setDisplayName} placeholder="Alex" />
+            <Field name="display_name" label="Display name" placeholder="Alex" autoComplete="nickname" />
           )}
-          <Field label="Username" value={username} onChange={setUsername} placeholder="alex" autoComplete="username" />
+          <Field name="username" label="Username" placeholder="alex" autoComplete="username" required />
           <Field
+            name="password"
             label="Password"
-            value={password}
-            onChange={setPassword}
             type="password"
             placeholder="••••••••"
             autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+            required
           />
           {mode === 'register' && !firstOwner && !(health?.open_signup) && (
-            <Field label="Invite code" value={invite} onChange={setInvite} placeholder="from the owner" />
+            <Field name="invite_code" label="Invite code" placeholder="from the owner" autoComplete="off" />
           )}
-          {error && <div className="text-sm text-[var(--danger)]">{error}</div>}
+          {error && (
+            <div className="text-sm text-[var(--danger)]" role="alert">
+              {error}
+            </div>
+          )}
           <button
             type="submit"
-            className="w-full rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] font-semibold py-3 mt-1"
+            disabled={busy}
+            className="w-full rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] font-semibold py-3 mt-1 disabled:opacity-50"
           >
-            {mode === 'login' ? 'Enter' : firstOwner ? 'Create workspace' : 'Join workspace'}
+            {busy
+              ? 'Please wait…'
+              : mode === 'login'
+                ? 'Enter'
+                : firstOwner
+                  ? 'Create workspace'
+                  : 'Join workspace'}
           </button>
           {firstOwner && (
             <p className="text-xs text-[var(--muted)]">
@@ -383,29 +418,29 @@ function AuthScreen({
 }
 
 function Field({
+  name,
   label,
-  value,
-  onChange,
   type = 'text',
   placeholder,
   autoComplete,
+  required,
 }: {
+  name: string
   label: string
-  value: string
-  onChange: (v: string) => void
   type?: string
   placeholder?: string
   autoComplete?: string
+  required?: boolean
 }) {
   return (
     <label className="block space-y-1">
       <span className="text-xs text-[var(--muted)]">{label}</span>
       <input
+        name={name}
         type={type}
-        value={value}
         autoComplete={autoComplete}
         placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value)}
+        required={required}
         className="w-full rounded-xl bg-[var(--ink)]/60 border border-[var(--line)] px-3 py-2.5 outline-none focus:border-[var(--accent)]/50"
       />
     </label>
