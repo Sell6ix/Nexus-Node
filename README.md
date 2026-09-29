@@ -23,21 +23,13 @@ Phone or PC browser (PWA)
 ## Quick start
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-cd web && npm install && npm run build && cd ..
-cp .env.example .env   # optional OPENAI_API_KEY; users can also set keys in the app
-python main.py --mode web
+./scripts/setup.sh && ./scripts/start.sh          # Linux / macOS
+.\scripts\setup.ps1; .\scripts\start.ps1          # Windows
 ```
 
-Open **http://\<pc-ip\>:8743** on the PC or phone (same Wi‑Fi).
+Open the URL printed in the console. First account = owner. Paste your AI key in Settings.
 
-### One command after the first setup
-
-```bash
-./scripts/start.sh                 # Linux / macOS
-.\scripts\start.ps1                # Windows
-```
+API keys are encrypted on disk (`data/secrets.key` or `NEXUS_SECRETS_KEY`). Keep that file private.
 
 Autostart on login:
 
@@ -101,7 +93,7 @@ In the web app → Devices → add `http://192.168.x.x:8765` + token → **Home*
 ## Security notes
 
 - Bind `0.0.0.0` only on trusted LAN (or put behind VPN/Tailscale)  
-- Each user stores their own API key on the hub disk (`data/accounts.json`)  
+- Each user stores their own API key on the hub disk, encrypted (`data/secrets.key`)  
 - Confirm dangerous tools in the app UI  
 - Prefer invite codes over open signup on shared networks  
 

@@ -28,6 +28,7 @@ from core.permissions import Role
 from core.push import PushStore
 from core.registry import ToolRegistry
 from core.reminders import ReminderNotifier
+from core.secrets import default_box
 from core.users import UserProfile
 from core.web_confirm import WebConfirmBroker
 
@@ -107,9 +108,11 @@ def create_app(
     jwt_secret = os.getenv("NEXUS_JWT_SECRET") or _load_or_create_secret(
         settings.data_dir / "jwt_secret.txt"
     )
+    secret_box = default_box(settings.data_dir)
     accounts = AccountStore(
         settings.data_dir / "accounts.json",
         max_members=int(os.getenv("NEXUS_MAX_MEMBERS", "50")),
+        secrets=secret_box,
     )
     devices = DeviceRegistry(
         settings.devices_path,

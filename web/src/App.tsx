@@ -210,6 +210,20 @@ export default function App() {
         ))}
       </nav>
 
+      {!user.has_api_key && (
+        <button
+          type="button"
+          onClick={() => setTab('settings')}
+          className="mb-3 text-left rounded-2xl border border-[var(--warn)]/40 bg-[var(--panel)] px-4 py-3"
+        >
+          <div className="text-sm font-medium">Finish setup</div>
+          <p className="text-xs text-[var(--muted)] mt-1">
+            Add your AI API key in Settings — each person uses their own. Then
+            Enable notifications if you want closed-app reminders.
+          </p>
+        </button>
+      )}
+
       {tab === 'chat' && (
         <section className="flex-1 flex flex-col min-h-0">
           <div className="flex-1 overflow-y-auto space-y-3 pb-3">

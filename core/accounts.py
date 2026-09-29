@@ -12,6 +12,11 @@ from typing import Any, Literal
 
 import bcrypt
 
+from core.secrets import SecretBox
+
+
+RoleName = Literal["owner", "member"]
+
 
 RoleName = Literal["owner", "member"]
 
@@ -75,10 +80,17 @@ class Invite:
 class AccountStore:
     """JSON account registry under ``data/accounts.json``."""
 
-    def __init__(self, path: Path, *, max_members: int = 50) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        max_members: int = 50,
+        secrets: SecretBox | None = None,
+    ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.max_members = max_members
+        self.secrets = secrets
         self.accounts: dict[str, Account] = {}
         self.by_username: dict[str, str] = {}
         self.invites: dict[str, Invite] = {}
@@ -101,7 +113,7 @@ class AccountStore:
                 role=item.get("role") if item.get("role") in {"owner", "member"} else "member",
                 display_name=str(item.get("display_name") or ""),
                 created_at=float(item.get("created_at") or time.time()),
-                api_key=item.get("api_key") or None,
+                api_key=self._unlock(item.get("api_key")),
                 api_base_url=item.get("api_base_url") or None,
                 model=item.get("model") or None,
                 active_device_id=item.get("active_device_id") or None,
@@ -124,10 +136,33 @@ class AccountStore:
                 used_by=item.get("used_by"),
             )
             self.invites[inv.code] = inv
+        # Rewrite plaintext keys as ciphertext after first load with a box.
+        if self.secrets is not None:
+            self._save()
+
+    def _unlock(self, stored: Any) -> str | None:
+        raw = stored if isinstance(stored, str) else None
+        if not raw:
+            return None
+        if self.secrets is None:
+            return raw
+        return self.secrets.open(raw)
+
+    def _lock(self, plaintext: str | None) -> str | None:
+        if not plaintext:
+            return None
+        if self.secrets is None:
+            return plaintext
+        return self.secrets.seal(plaintext)
 
     def _save(self) -> None:
+        rows = []
+        for acc in self.accounts.values():
+            payload = asdict(acc)
+            payload["api_key"] = self._lock(acc.api_key)
+            rows.append(payload)
         payload = {
-            "accounts": [asdict(a) for a in self.accounts.values()],
+            "accounts": rows,
             "invites": [asdict(i) for i in self.invites.values()],
         }
         self.path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

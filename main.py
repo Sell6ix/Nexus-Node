@@ -34,6 +34,7 @@ from core.devices import DeviceRegistry
 from core.pairing import PairingStore
 from core.permissions import Role
 from core.registry import ToolRegistry
+from core.secrets import default_box
 from core.telegram_api import TelegramClient
 from core.telegram_bot import TelegramBot
 from core.users import UserStore
@@ -138,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         local_name=settings.device_name,
         local_token=settings.worker_token,
     )
-    users = UserStore(settings.users_dir)
+    users = UserStore(settings.users_dir, secrets=default_box(settings.data_dir))
     audit = get_audit_logger(settings.audit_log_path)
 
     if args.mode == "web":
