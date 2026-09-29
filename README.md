@@ -91,6 +91,8 @@ Friends cannot use `run_shell`, file push, steamcmd update, etc. Kill-process is
 `add_note` `list_notes` `add_todo` `list_todos` `complete_todo` `set_reminder` `list_reminders`
 
 Notes/todos/reminders are **per Telegram user** (`data/daily/users/<id>/`).  
+Reminders with a parseable time (`in 10 minutes`, ISO, `HH:MM`, `tomorrow 09:00`) are delivered as a Telegram ping while the hub is online.  
+`/home DEVICE_ID` sets the default device; `/use` is a session override.  
 Plus existing ADB / Cursor / Steam / system / desktop tools.
 
 ## Security checklist

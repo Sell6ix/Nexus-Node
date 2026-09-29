@@ -6,6 +6,7 @@ import shlex
 import threading
 import time
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 
 from core.agent import Agent
@@ -18,6 +19,7 @@ from core.inbound import extract_media, save_telegram_media, transcribe_audio_fi
 from core.pairing import PairResult, PairingStore
 from core.permissions import Role
 from core.registry import ToolRegistry
+from core.reminders import ReminderNotifier
 from core.telegram_api import TelegramAPIError, TelegramClient
 from core.users import UserStore, redact_secrets
 
@@ -36,7 +38,9 @@ Setup (you):
 
 Devices:
 /devices
-/use DEVICE_ID
+/use DEVICE_ID          — this session
+/home DEVICE_ID         — default when /use not set
+/home clear
 /device_add ID "Name With Spaces" URL TOKEN   (owner, quotes OK)
 /device_add ID|Name|URL|TOKEN                 (owner, pipe form)
 /device_del ID                                (owner)
@@ -47,6 +51,7 @@ Friends:
 /lock /unlock /revoke ID
 
 Other: /tools /status /inbox /audit /reset /help
+Reminders: ask in chat (“remind me in 10 minutes…”) — hub pings you when due.
 """
 
 APIKEY_WARNING = (
@@ -99,9 +104,35 @@ class TelegramBot:
         self._owner_gateway: TelegramGateway | None = None
         self._stop = threading.Event()
         self._offset: int | None = None
+        self._chat_locks: dict[str, threading.Lock] = {}
+        self._chat_locks_guard = threading.Lock()
+        daily_root = Path(settings.data_dir) / "daily"
+        self.reminders = ReminderNotifier(
+            daily_root=daily_root,
+            send=self._send_reminder,
+            interval_seconds=30.0,
+        )
+
+    def _send_reminder(self, chat_id: str, text: str) -> None:
+        self.client.send_message(chat_id, text)
+        self.audit.log("reminder_delivered", chat_id=chat_id, text=text[:120])
+
+    def _lock_for_chat(self, chat_id: int | str) -> threading.Lock:
+        key = str(chat_id)
+        with self._chat_locks_guard:
+            lock = self._chat_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._chat_locks[key] = lock
+            return lock
+
+    def _device_id_for(self, chat_id: int | str) -> str:
+        profile = self.users.get(chat_id)
+        return profile.resolve_device_id(self.devices.local_id)
 
     def stop(self) -> None:
         self._stop.set()
+        self.reminders.stop()
 
     def run_in_background(self) -> threading.Thread:
         thread = threading.Thread(target=self.run_forever, name="telegram-bot", daemon=True)
@@ -116,6 +147,7 @@ class TelegramBot:
         print(f"Pairing open: {self.pairing.pairing_open}")
         print(f"Devices file: {self.devices.path}")
         print()
+        self.reminders.start()
 
         while not self._stop.is_set():
             try:
@@ -181,9 +213,10 @@ class TelegramBot:
 
     def _agent_for(self, chat_id: int | str) -> Agent:
         key = str(chat_id)
+        profile = self.users.get(chat_id)
+        device_id = profile.resolve_device_id(self.devices.local_id)
         agent = self._agents.get(key)
         if agent is None:
-            profile = self.users.get(chat_id)
             role = self.pairing.role_of(chat_id)
             agent = Agent(
                 self.registry,
@@ -195,9 +228,13 @@ class TelegramBot:
                 requester_id=str(chat_id),
                 user_profile=profile,
                 devices=self.devices,
-                active_device_id=profile.active_device_id or self.devices.local_id,
+                active_device_id=device_id,
             )
             self._agents[key] = agent
+        else:
+            # Keep device routing in sync with /use and /home without full reset.
+            agent.user_profile = profile
+            agent.active_device_id = device_id
         return agent
 
     def _confirm_as_owner(self, prompt: str, _use_telegram: bool) -> bool:
@@ -299,6 +336,9 @@ class TelegramBot:
             return
         if lowered.startswith("/use"):
             self._cmd_use(chat_id, text)
+            return
+        if lowered.startswith("/home"):
+            self._cmd_home(chat_id, text)
             return
         if lowered.startswith("/device_add"):
             self._cmd_device_add(chat_id, text)
@@ -477,21 +517,42 @@ class TelegramBot:
 
     def _cmd_devices(self, chat_id: int | str) -> None:
         profile = self.users.get(chat_id)
-        active = profile.active_device_id or self.devices.local_id
+        active = profile.resolve_device_id(self.devices.local_id)
+        home = profile.home_device_id or "(unset)"
         rows = self.devices.visible_to(chat_id, is_owner=self.pairing.is_owner(chat_id))
-        lines = [f"Active: {active}", "Devices:"]
+        lines = [
+            f"Active (resolved): {active}",
+            f"Session /use: {profile.active_device_id or '(none — using home)'}",
+            f"Home /home: {home}",
+            "Devices:",
+        ]
         for d in rows:
-            mark = "←" if d.id == active else ""
+            marks = []
+            if d.id == active:
+                marks.append("←")
+            if profile.home_device_id and d.id == profile.home_device_id:
+                marks.append("home")
             mode = "local" if d.is_local else "remote"
-            lines.append(f"• {d.id} — {d.name} ({mode}) {mark}")
+            suffix = f" {' '.join(marks)}" if marks else ""
+            lines.append(f"• {d.id} — {d.name} ({mode}){suffix}")
         self.client.send_message(chat_id, "\n".join(lines))
 
     def _cmd_use(self, chat_id: int | str, text: str) -> None:
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            self.client.send_message(chat_id, "Usage: /use DEVICE_ID")
+            self.client.send_message(
+                chat_id,
+                "Usage: /use DEVICE_ID   (session override)\n"
+                "/use clear   — fall back to /home",
+            )
             return
         device_id = parts[1].strip()
+        if device_id.lower() == "clear":
+            self.users.set_active_device(chat_id, None)
+            self._invalidate_agent(chat_id)
+            resolved = self._device_id_for(chat_id)
+            self.client.send_message(chat_id, f"Session cleared. Using home/default → {resolved}")
+            return
         visible = {
             d.id: d
             for d in self.devices.visible_to(chat_id, is_owner=self.pairing.is_owner(chat_id))
@@ -500,10 +561,45 @@ class TelegramBot:
             self.client.send_message(chat_id, "Unknown or unauthorized device.")
             return
         self.users.set_active_device(chat_id, device_id)
+        # First successful /use also seeds home if unset.
+        self.users.ensure_home_device(chat_id, device_id)
         self._invalidate_agent(chat_id)
         ping = ping_device(visible[device_id])
         status = "online" if ping.get("ok") else f"unreachable ({ping.get('error')})"
         self.client.send_message(chat_id, f"Active device → {device_id} ({status})")
+
+    def _cmd_home(self, chat_id: int | str, text: str) -> None:
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            profile = self.users.get(chat_id)
+            self.client.send_message(
+                chat_id,
+                "Usage: /home DEVICE_ID\n"
+                "/home clear\n"
+                f"Current home: {profile.home_device_id or '(unset)'}\n"
+                f"Resolved active: {profile.resolve_device_id(self.devices.local_id)}",
+            )
+            return
+        device_id = parts[1].strip()
+        if device_id.lower() == "clear":
+            self.users.set_home_device(chat_id, None)
+            self._invalidate_agent(chat_id)
+            self.client.send_message(chat_id, "Home device cleared.")
+            return
+        visible = {
+            d.id: d
+            for d in self.devices.visible_to(chat_id, is_owner=self.pairing.is_owner(chat_id))
+        }
+        if device_id not in visible:
+            self.client.send_message(chat_id, "Unknown or unauthorized device.")
+            return
+        self.users.set_home_device(chat_id, device_id)
+        self._invalidate_agent(chat_id)
+        self.client.send_message(
+            chat_id,
+            f"Home device → {device_id}\n"
+            "(Used when /use is not set. /use still overrides for the session.)",
+        )
 
     def _cmd_device_add(self, chat_id: int | str, text: str) -> None:
         if not self.pairing.is_owner(chat_id):
@@ -572,9 +668,13 @@ class TelegramBot:
         if result == PairResult.OK:
             role = self.pairing.role_of(chat_id).value
             print(f"Paired {chat_id} as {role}")
+            self.users.ensure_home_device(chat_id, self.devices.local_id)
             self.client.send_message(
                 chat_id,
-                f"Paired ✅ as {role}.\nNext: /apikey YOUR_KEY then send a command.\n/devices to pick a device.",
+                f"Paired ✅ as {role}.\n"
+                f"Home device set to {self.devices.local_id} "
+                "(change with /home).\n"
+                "Next: /apikey YOUR_KEY then send a command.",
             )
             if self.pairing.is_owner(chat_id):
                 self.client.send_message(chat_id, HELP_TEXT)
@@ -599,7 +699,8 @@ class TelegramBot:
 
     def _send_status(self, chat_id: int | str) -> None:
         profile = self.users.get(chat_id)
-        device = self.devices.get(profile.active_device_id or self.devices.local_id)
+        device_id = profile.resolve_device_id(self.devices.local_id)
+        device = self.devices.get(device_id)
         self.client.send_message(
             chat_id,
             "\n".join(
@@ -608,9 +709,12 @@ class TelegramBot:
                     f"Role: {self.pairing.role_of(chat_id).value}",
                     f"Your API key: {'yes' if profile.has_api_key() else 'NO — /apikey'}",
                     f"Model: {profile.model or self.settings.openai_model}",
-                    f"Device: {device.id if device else '?'} ({'local' if device and device.is_local else 'remote'})",
+                    f"Device: {device.id if device else '?'} "
+                    f"({'local' if device and device.is_local else 'remote'})",
+                    f"Home: {profile.home_device_id or '(unset)'}",
                     f"Tools: {len(self.registry)}",
                     f"Friends: {len(self.pairing.friends)}",
+                    "Reminders: auto-ping while hub is online",
                 ]
             ),
         )
@@ -691,18 +795,27 @@ class TelegramBot:
             self._run_agent(chat_id, prompt)
 
     def _run_agent(self, chat_id: int | str, text: str) -> None:
-        agent = self._agent_for(chat_id)
-        gateway = self.owner_gateway()
-        profile = self.users.get(chat_id)
-        device_id = profile.active_device_id or self.devices.local_id
-        self.client.send_message(chat_id, "⏳ Working…")
-        confirm_ctx = use_confirmation_gateway(gateway) if gateway else nullcontext()
-        with request_context(user_id=str(chat_id), device_id=device_id), confirm_ctx:
-            try:
-                reply = agent.run(text)
-            except Exception as exc:  # noqa: BLE001
-                reply = f"Error: {redact_secrets(str(exc))}"
-        self.client.send_message(chat_id, reply or "(empty reply)")
+        lock = self._lock_for_chat(chat_id)
+        if not lock.acquire(blocking=False):
+            self.client.send_message(
+                chat_id,
+                "⏳ Still working on your previous message — send again in a moment.",
+            )
+            return
+        try:
+            agent = self._agent_for(chat_id)
+            gateway = self.owner_gateway()
+            device_id = self._device_id_for(chat_id)
+            self.client.send_message(chat_id, "⏳ Working…")
+            confirm_ctx = use_confirmation_gateway(gateway) if gateway else nullcontext()
+            with request_context(user_id=str(chat_id), device_id=device_id), confirm_ctx:
+                try:
+                    reply = agent.run(text)
+                except Exception as exc:  # noqa: BLE001
+                    reply = f"Error: {redact_secrets(str(exc))}"
+            self.client.send_message(chat_id, reply or "(empty reply)")
+        finally:
+            lock.release()
 
 
 def _parse_device_add(text: str) -> tuple[str, str, str, str] | None:

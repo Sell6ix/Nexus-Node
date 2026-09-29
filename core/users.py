@@ -19,11 +19,20 @@ class UserProfile:
     api_base_url: str | None = None  # OpenAI-compatible endpoint
     model: str | None = None
     active_device_id: str | None = None
+    home_device_id: str | None = None
     display_name: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
     def has_api_key(self) -> bool:
         return bool(self.api_key)
+
+    def resolve_device_id(self, fallback_local_id: str) -> str:
+        """Session active device, else home default, else hub local id."""
+        return (
+            (self.active_device_id or "").strip()
+            or (self.home_device_id or "").strip()
+            or fallback_local_id
+        )
 
     def public_dict(self) -> dict[str, Any]:
         """Safe view for status messages (never includes raw key)."""
@@ -36,7 +45,8 @@ class UserProfile:
             "api_key": masked or "(not set)",
             "api_base_url": self.api_base_url or "(default OpenAI)",
             "model": self.model or "(default)",
-            "active_device_id": self.active_device_id or "(local)",
+            "active_device_id": self.active_device_id or "(use home)",
+            "home_device_id": self.home_device_id or "(unset)",
             "display_name": self.display_name,
         }
 
@@ -66,6 +76,7 @@ class UserStore:
             api_base_url=raw.get("api_base_url") or None,
             model=raw.get("model") or None,
             active_device_id=raw.get("active_device_id") or None,
+            home_device_id=raw.get("home_device_id") or None,
             display_name=str(raw.get("display_name") or ""),
             extra=dict(raw.get("extra") or {}),
         )
@@ -98,6 +109,20 @@ class UserStore:
         profile = self.get(chat_id)
         profile.active_device_id = (device_id or "").strip() or None
         self.save(profile)
+        return profile
+
+    def set_home_device(self, chat_id: int | str, device_id: str | None) -> UserProfile:
+        profile = self.get(chat_id)
+        profile.home_device_id = (device_id or "").strip() or None
+        self.save(profile)
+        return profile
+
+    def ensure_home_device(self, chat_id: int | str, device_id: str) -> UserProfile:
+        """Set home only if unset (first pair / first use)."""
+        profile = self.get(chat_id)
+        if not profile.home_device_id:
+            profile.home_device_id = (device_id or "").strip() or None
+            self.save(profile)
         return profile
 
 

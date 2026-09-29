@@ -10,6 +10,7 @@ from typing import Any
 
 from core.context import get_user_id
 from core.registry import tool
+from core.reminders import parse_when
 
 _ROOT = Path(__file__).resolve().parent.parent / "data" / "daily"
 
@@ -175,35 +176,50 @@ def complete_todo(todo_id: str) -> dict[str, Any]:
 
 @tool
 def set_reminder(text: str, when: str) -> dict[str, Any]:
-    """Store a reminder for the current user (local list; not a push scheduler yet).
+    """Store a reminder for the current user; Telegram hub will ping when due.
+
+    Prefer parseable times so delivery works: ISO datetime, ``in 10 minutes``,
+    ``HH:MM``, ``tomorrow 09:00``, or ``YYYY-MM-DD HH:MM``.
 
     Args:
         text: Reminder text.
-        when: When to remember (free text or ISO datetime).
+        when: When to remember (ISO / relative / clock time preferred).
 
     Returns:
-        The stored reminder.
+        The stored reminder (includes due_at when parsed).
     """
     try:
         body = text.strip()
         if not body:
             return {"ok": False, "error": "text must not be empty"}
+        when_raw = when.strip()
+        if not when_raw:
+            return {"ok": False, "error": "when must not be empty"}
+        due = parse_when(when_raw)
         rows = _load(_reminders_path())
-        item = {
+        item: dict[str, Any] = {
             "id": uuid.uuid4().hex[:10],
             "text": body,
-            "when": when.strip(),
+            "when": when_raw,
+            "due_at": due.isoformat() if due else None,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "done": False,
+            "notified_at": None,
             "user_id": get_user_id(),
         }
         rows.append(item)
         _save(_reminders_path(), rows[-500:])
-        return {
-            "ok": True,
-            "reminder": item,
-            "note": "Stored for this user only. Push/cron delivery is not automatic yet.",
-        }
+        if due:
+            note = (
+                f"Will ping you on Telegram around {due.isoformat()} "
+                "(hub must stay online)."
+            )
+        else:
+            note = (
+                "Stored, but time was not parseable for auto-delivery. "
+                "Use ISO, 'in 10 minutes', 'HH:MM', or 'tomorrow 09:00'."
+            )
+        return {"ok": True, "reminder": item, "note": note}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
 
