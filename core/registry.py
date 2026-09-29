@@ -59,12 +59,15 @@ class ToolRegistry:
 
         description = _docstring_summary(func)
         parameters_model = _build_parameters_model(func, tool_name)
+        parameters_schema = parameters_model.model_json_schema()
+        # OpenAI function tools expect a flat JSON Schema object; drop noise.
+        parameters_schema.pop("title", None)
         openai_schema = {
             "type": "function",
             "function": {
                 "name": tool_name,
                 "description": description,
-                "parameters": parameters_model.model_json_schema(),
+                "parameters": parameters_schema,
             },
         }
         registered = RegisteredTool(

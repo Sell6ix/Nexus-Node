@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import mimetypes
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -15,19 +15,27 @@ from core.registry import tool
 ProcessAction = Literal["check", "kill"]
 
 
+def _primary_disk_path() -> str:
+    """Pick a sensible disk root for the current OS."""
+    if os.name == "nt":
+        return os.environ.get("SystemDrive", "C:") + "\\"
+    return "/"
+
+
 @tool
 def get_system_stats() -> dict[str, Any]:
     """Collect CPU, memory, disk, and top-process stats for this machine.
 
     Uses psutil. Safe read-only inspection — no confirmation required.
+    Useful from phone (Telegram) to check PC health remotely.
 
     Returns:
         A dict with cpu_percent, memory, disk, boot_time, and top processes.
     """
     try:
         memory = psutil.virtual_memory()
-        disk = psutil.disk_usage("/")
-        # First call may return 0.0; a short interval improves accuracy.
+        disk_path = _primary_disk_path()
+        disk = psutil.disk_usage(disk_path)
         cpu = psutil.cpu_percent(interval=0.2)
 
         top: list[dict[str, Any]] = []
@@ -48,6 +56,7 @@ def get_system_stats() -> dict[str, Any]:
         top.sort(key=lambda p: p["cpu_percent"], reverse=True)
         return {
             "ok": True,
+            "hostname": os.uname().nodename if hasattr(os, "uname") else os.environ.get("COMPUTERNAME"),
             "cpu_percent": cpu,
             "cpu_count": psutil.cpu_count(logical=True),
             "memory": {
@@ -56,6 +65,7 @@ def get_system_stats() -> dict[str, Any]:
                 "percent": memory.percent,
             },
             "disk": {
+                "path": disk_path,
                 "total_gb": round(disk.total / (1024**3), 2),
                 "used_gb": round(disk.used / (1024**3), 2),
                 "percent": disk.percent,
@@ -72,10 +82,11 @@ def manage_process(
     process_name: str,
     action: ProcessAction = "check",
 ) -> dict[str, Any]:
-    """Check or kill processes by name.
+    """Check or kill processes by name on the host PC.
 
     Use action="check" (default) to list matching processes.
-    Use action="kill" to terminate matches — requires interactive confirmation.
+    Use action="kill" to terminate matches — requires confirmation
+    (console on PC, Telegram Yes/No buttons from phone).
 
     Args:
         process_name: Process name substring to match (case-insensitive).
@@ -121,7 +132,6 @@ def manage_process(
                 "matches": summaries[:50],
             }
 
-        # Dangerous path: require explicit Y/N (Telegram button hook stub included).
         prompt = (
             f"Kill {len(summaries)} process(es) matching {process_name!r}? "
             f"pids={[s['pid'] for s in summaries[:20]]}"
@@ -158,14 +168,15 @@ def manage_process(
 
 @tool
 def send_telegram_backup(file_path: str) -> dict[str, Any]:
-    """Send a local file to Telegram as a document via the Bot API.
+    """Send a local PC file to Telegram as a document via the Bot API.
 
     Uses TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from the environment.
     If secrets are missing, returns a clear mock/local fallback result instead
     of failing hard — useful for offline demos.
+    From phone, this is a good way to pull a file off the PC.
 
     Args:
-        file_path: Path to the file to upload as a Telegram document.
+        file_path: Path to the file on the host PC to upload as a Telegram document.
 
     Returns:
         A dict with ok status, telegram message metadata, or mock fallback info.
@@ -188,42 +199,19 @@ def send_telegram_backup(file_path: str) -> dict[str, Any]:
                 ),
             }
 
-        import urllib.error
-        import urllib.request
+        from core.telegram_api import TelegramAPIError, TelegramClient
 
-        boundary = "----NexusNodeBoundary7MA4YWxkTrZu0gW"
-        mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
-        file_bytes = path.read_bytes()
-        body = (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
-            f"{settings.telegram_chat_id}\r\n"
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="document"; filename="{path.name}"\r\n'
-            f"Content-Type: {mime}\r\n\r\n"
-        ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
-
-        url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendDocument"
-        request = urllib.request.Request(
-            url,
-            data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-            method="POST",
-        )
+        client = TelegramClient(settings.telegram_bot_token)  # type: ignore[arg-type]
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                raw = response.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            return {"ok": False, "error": f"Telegram API HTTP {exc.code}: {detail}"}
-        except urllib.error.URLError as exc:
-            return {"ok": False, "error": f"Telegram API network error: {exc}"}
+            result = client.send_document(settings.telegram_chat_id, path)  # type: ignore[arg-type]
+        except TelegramAPIError as exc:
+            return {"ok": False, "error": str(exc), "file_path": str(path)}
 
         return {
             "ok": True,
             "mock": False,
             "file_path": str(path),
-            "telegram_response": raw[:2000],
+            "telegram_message_id": (result or {}).get("message_id"),
         }
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc), "file_path": file_path}

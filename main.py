@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Nexus Node — personal assistant orchestrator CLI.
+"""Nexus Node — personal assistant orchestrator.
 
-Agent loop: natural-language command → LLM tool selection → confirmation
-(if required) → execute → reply.
+Modes:
+  cli       — local console on the PC (default)
+  telegram  — control the same PC agent from a phone via Telegram
+  both      — CLI + Telegram together (confirmations can use phone buttons)
 """
 
 from __future__ import annotations
@@ -12,20 +14,39 @@ import json
 import sys
 from pathlib import Path
 
-# Ensure the repo root is importable when launched as a script.
 _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from core.agent import Agent
 from core.config import load_settings
+from core.confirmation import (
+    ConsoleGateway,
+    PreferTelegramThenConsoleGateway,
+    TelegramGateway,
+    set_confirmation_gateway,
+)
 from core.registry import ToolRegistry
+from core.telegram_api import TelegramClient
+from core.telegram_bot import TelegramBot
 
 
 def build_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.discover("tools")
     return registry
+
+
+def load_dotenv_if_present() -> None:
+    env_path = _ROOT / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(env_path)
+    except ImportError:
+        pass
 
 
 def print_tools(registry: ToolRegistry) -> None:
@@ -47,7 +68,12 @@ def run_repl(agent: Agent) -> int:
     print(f"Model: {settings.openai_model}")
     print(f"OpenAI: {'configured' if settings.has_openai else 'MISSING (set OPENAI_API_KEY)'}")
     print(
-        f"Telegram: {'configured' if settings.has_telegram else 'mock fallback (no bot token/chat id)'}"
+        "Telegram: "
+        + (
+            "bot ready"
+            if settings.has_telegram_bot
+            else "not configured (set TELEGRAM_BOT_TOKEN for phone access)"
+        )
     )
     print(f"Tools: {len(agent.registry)}")
     print("Type a command, or 'help' / 'tools' / 'reset' / 'exit'.\n")
@@ -72,6 +98,9 @@ def run_repl(agent: Agent) -> int:
                 "  tools    — list registered tools\n"
                 "  reset    — clear conversation memory\n"
                 "  exit     — quit\n"
+                "\n"
+                "Phone access: run `python main.py --mode telegram` on this PC,\n"
+                "then chat with your Telegram bot from the phone.\n"
             )
             continue
         if lowered == "tools":
@@ -86,14 +115,34 @@ def run_repl(agent: Agent) -> int:
         print(f"\nassistant> {reply}\n")
 
 
+def _build_telegram_gateway(settings) -> tuple[TelegramClient, dict[str, TelegramGateway]] | None:
+    if not settings.has_telegram_bot:
+        return None
+    client = TelegramClient(settings.telegram_bot_token)
+    gateways: dict[str, TelegramGateway] = {}
+    if settings.telegram_chat_id:
+        gateways[str(settings.telegram_chat_id)] = TelegramGateway(
+            client=client,
+            chat_id=settings.telegram_chat_id,
+            timeout_seconds=settings.confirmation_timeout_seconds,
+        )
+    return client, gateways
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Nexus Node personal assistant orchestrator",
+        description="Nexus Node personal assistant orchestrator (PC CLI + Telegram phone)",
     )
     parser.add_argument(
         "-c",
         "--command",
         help="Run a single natural-language command and exit",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("cli", "telegram", "both"),
+        default="cli",
+        help="cli=local console, telegram=phone bot, both=CLI+Telegram together",
     )
     parser.add_argument(
         "--list-tools",
@@ -107,16 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # Optional .env support without making python-dotenv a hard dependency.
-    env_path = _ROOT / ".env"
-    if env_path.is_file():
-        try:
-            from dotenv import load_dotenv
-
-            load_dotenv(env_path)
-        except ImportError:
-            pass
-
+    load_dotenv_if_present()
     registry = build_registry()
 
     if args.list_tools:
@@ -127,6 +167,61 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     settings = load_settings()
+
+    if args.mode in {"telegram", "both"}:
+        if not settings.has_telegram_bot:
+            print(
+                "TELEGRAM_BOT_TOKEN is required for --mode telegram/both.\n"
+                "Create a bot via @BotFather, put the token in .env, then retry.",
+                file=sys.stderr,
+            )
+            return 2
+
+    shared_gateways: dict[str, TelegramGateway] = {}
+    tg_client: TelegramClient | None = None
+    if args.mode in {"telegram", "both"}:
+        tg_bundle = _build_telegram_gateway(settings)
+        if tg_bundle is None:
+            print("Failed to initialize Telegram client.", file=sys.stderr)
+            return 2
+        tg_client, shared_gateways = tg_bundle
+
+    # In CLI/both, prefer Telegram buttons when a chat is configured and bot is running.
+    if args.mode == "both" and settings.telegram_chat_id and tg_client is not None:
+        primary = shared_gateways.setdefault(
+            str(settings.telegram_chat_id),
+            TelegramGateway(
+                client=tg_client,
+                chat_id=settings.telegram_chat_id,
+                timeout_seconds=settings.confirmation_timeout_seconds,
+            ),
+        )
+        set_confirmation_gateway(PreferTelegramThenConsoleGateway(telegram=primary))
+    elif args.mode == "cli":
+        set_confirmation_gateway(ConsoleGateway())
+
+    bot: TelegramBot | None = None
+    if args.mode in {"telegram", "both"}:
+        bot = TelegramBot(
+            settings,
+            registry,
+            client=tg_client,
+            shared_gateways=shared_gateways,
+        )
+
+    if args.mode == "telegram":
+        assert bot is not None
+        try:
+            bot.run_forever()
+        except KeyboardInterrupt:
+            print("\nBye.")
+            bot.stop()
+        return 0
+
+    if args.mode == "both":
+        assert bot is not None
+        bot.run_in_background()
+
     agent = Agent(registry, settings)
 
     if args.command:

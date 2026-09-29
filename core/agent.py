@@ -20,11 +20,13 @@ from core.registry import ToolRegistry
 
 
 SYSTEM_PROMPT = """\
-You are Nexus Node, a personal PC assistant orchestrator.
-You help the user by selecting and calling the provided Python tools.
+You are Nexus Node, a personal assistant orchestrator running on the user's PC.
+The user may talk to you from the local CLI or remotely from their phone via Telegram.
+You help by selecting and calling the provided Python tools.
 Be concise, practical, and honest about failures or missing dependencies.
 When a tool result is enough to answer, summarize it clearly for the user.
 Never invent tool results — only report what tools actually returned.
+Prefer short replies that read well on a phone screen.
 """
 
 
@@ -80,52 +82,58 @@ class Agent:
         self._messages.append({"role": "user", "content": user_command})
         tools = self.registry.openai_tools()
 
-        for _ in range(max_tool_rounds):
-            response = self.client.chat.completions.create(
-                model=self.settings.openai_model,
-                messages=self._messages,
-                tools=tools or None,
-                tool_choice="auto" if tools else None,
+        try:
+            for _ in range(max_tool_rounds):
+                response = self.client.chat.completions.create(
+                    model=self.settings.openai_model,
+                    messages=self._messages,
+                    tools=tools or None,
+                    tool_choice="auto" if tools else None,
+                )
+                choice = response.choices[0]
+                message = choice.message
+
+                assistant_message: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": message.content or "",
+                }
+                if message.tool_calls:
+                    assistant_message["tool_calls"] = [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments or "{}",
+                            },
+                        }
+                        for tc in message.tool_calls
+                    ]
+                self._messages.append(assistant_message)
+
+                if not message.tool_calls:
+                    reply = (message.content or "").strip() or "(No response.)"
+                    return reply
+
+                for tool_call in message.tool_calls:
+                    result_text = self._execute_tool_call(
+                        tool_call.function.name,
+                        tool_call.function.arguments or "{}",
+                    )
+                    self._messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": result_text,
+                        }
+                    )
+
+            return (
+                "Stopped after the maximum number of tool rounds. "
+                "Please try a narrower request."
             )
-            choice = response.choices[0]
-            message = choice.message
-
-            assistant_message: dict[str, Any] = {
-                "role": "assistant",
-                "content": message.content or "",
-            }
-            if message.tool_calls:
-                assistant_message["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments or "{}",
-                        },
-                    }
-                    for tc in message.tool_calls
-                ]
-            self._messages.append(assistant_message)
-
-            if not message.tool_calls:
-                reply = (message.content or "").strip() or "(No response.)"
-                return reply
-
-            for tool_call in message.tool_calls:
-                result_text = self._execute_tool_call(
-                    tool_call.function.name,
-                    tool_call.function.arguments or "{}",
-                )
-                self._messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": result_text,
-                    }
-                )
-
-        return "Stopped after the maximum number of tool rounds. Please try a narrower request."
+        except Exception as exc:  # noqa: BLE001
+            return f"Agent error: {exc}"
 
     def _execute_tool_call(self, name: str, raw_arguments: str) -> str:
         registered = self.registry.get(name)
@@ -137,7 +145,7 @@ class Agent:
             if not isinstance(arguments, dict):
                 raise ValueError("Tool arguments must be a JSON object.")
             validated = registered.parse_arguments(arguments)
-        except Exception as exc:  # noqa: BLE001 — surface validation errors to the LLM
+        except Exception as exc:  # noqa: BLE001
             return json.dumps(
                 {
                     "ok": False,
@@ -146,13 +154,12 @@ class Agent:
             )
 
         func = registered.func
-        # The decorator wrapper already confirms on direct call, but the agent
-        # asks once up-front so the user sees intent before any side effects,
-        # then invokes the underlying function without double-prompting when
-        # possible. We still call through the public wrapper for safety.
         if needs_confirmation(func):
             prompt = confirmation_message_for(func, validated)
-            allowed = self.confirm_fn(prompt, uses_telegram_button_hook(func))
+            # Include tool name + args so phone confirmations stay informative
+            # even when the decorator used a short static message.
+            detailed = f"{prompt}\n\nTool: {name}\nArgs: {json.dumps(validated, default=str)}"
+            allowed = self.confirm_fn(detailed, uses_telegram_button_hook(func))
             if not allowed:
                 return json.dumps(
                     {
@@ -161,7 +168,6 @@ class Agent:
                         "tool": name,
                     }
                 )
-            # Bypass the wrapper's second prompt by calling __wrapped__ when present.
             target = getattr(func, "__wrapped__", func)
             try:
                 result = target(**validated)
