@@ -14,15 +14,30 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null)
   const [error, setError] = useState('')
   const [tab, setTab] = useState<Tab>('chat')
-  const [messages, setMessages] = useState<Msg[]>([
-    { role: 'system', text: 'Ask anything — notes, todos, PC stats, open a URL…' },
-  ])
+  const welcome: Msg = { role: 'system', text: 'Ask anything — notes, todos, PC stats, open a URL…' }
+  const [messages, setMessages] = useState<Msg[]>([welcome])
+  const [chatReady, setChatReady] = useState(false)
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [authBusy, setAuthBusy] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmReq | null>(null)
   const [toast, setToast] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
+
+  async function loadChat() {
+    try {
+      const res = await api.getChat()
+      const rows = (res.messages || []).map((m) => ({
+        role: m.role,
+        text: m.text,
+      }))
+      setMessages(rows.length ? rows : [welcome])
+    } catch {
+      setMessages([welcome])
+    } finally {
+      setChatReady(true)
+    }
+  }
 
   useEffect(() => {
     ;(async () => {
@@ -34,6 +49,7 @@ export default function App() {
           const me = await api.me()
           setUser(me.user)
           setBoot('app')
+          await loadChat()
         } else {
           setBoot('auth')
         }
@@ -104,10 +120,23 @@ export default function App() {
       setToken(res.token)
       setUser(res.user)
       setBoot('app')
+      setChatReady(false)
+      await loadChat()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Auth failed')
     } finally {
       setAuthBusy(false)
+    }
+  }
+
+  async function clearChat() {
+    if (busy) return
+    try {
+      await api.clearChat()
+      setMessages([welcome])
+      setToast('Chat cleared')
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : 'Could not clear chat')
     }
   }
 
@@ -146,6 +175,7 @@ export default function App() {
     setToken(null)
     setUser(null)
     setBoot('auth')
+    setChatReady(false)
     setMessages([{ role: 'system', text: 'Signed out.' }])
   }
 
@@ -226,6 +256,19 @@ export default function App() {
 
       {tab === 'chat' && (
         <section className="flex-1 flex flex-col min-h-0">
+          <div className="flex items-center justify-between gap-2 pb-2">
+            <p className="text-xs text-[var(--muted)]">
+              {chatReady ? 'Saved on this hub — survives reload.' : 'Loading chat…'}
+            </p>
+            <button
+              type="button"
+              onClick={() => void clearChat()}
+              disabled={busy || !chatReady}
+              className="text-xs text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-40 px-2 py-1"
+            >
+              Clear chat
+            </button>
+          </div>
           <div className="flex-1 overflow-y-auto space-y-3 pb-3">
             {messages.map((m, i) => (
               <Bubble key={i} msg={m} />

@@ -134,6 +134,15 @@ class Agent:
         first = self._messages[0]
         self._messages = [first]
 
+    def seed_from_transcript(self, turns: list[dict[str, str]]) -> None:
+        """Restore recent user/assistant turns (no tool calls) into the LLM context."""
+        self.reset()
+        for turn in turns:
+            role = turn.get("role")
+            content = (turn.get("content") or "").strip()
+            if role in {"user", "assistant"} and content:
+                self._messages.append({"role": role, "content": content})
+
     def run(self, user_command: str, *, max_tool_rounds: int = 8) -> str:
         if self.client is None:
             return (

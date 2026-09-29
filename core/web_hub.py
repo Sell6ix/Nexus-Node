@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from core.accounts import Account, AccountStore
 from core.agent import Agent
 from core.audit import get_audit_logger
+from core.chat_history import ChatHistory
 from core.config import Settings
 from core.context import request_context
 from core.devices import DeviceRegistry, ping_device
@@ -127,6 +128,9 @@ def create_app(
     audit = get_audit_logger(settings.audit_log_path)
     broker = WebConfirmBroker(timeout_seconds=settings.confirmation_timeout_seconds)
     push = PushStore(settings.data_dir / "push.json")
+    chats = ChatHistory(settings.data_dir / "chats")
+    agents: dict[str, Agent] = {}
+    agents_guard = threading.Lock()
     agent_locks: dict[str, threading.Lock] = {}
     agent_locks_guard = threading.Lock()
 
@@ -146,6 +150,40 @@ def create_app(
                 lock = threading.Lock()
                 agent_locks[user_id] = lock
             return lock
+
+    def _agent_for(account: Account) -> Agent:
+        with agents_guard:
+            agent = agents.get(account.id)
+            role = Role.OWNER if account.role == "owner" else Role.FRIEND
+            device_id = account.resolve_device_id(devices.local_id)
+            profile = _account_to_profile(account)
+
+            def confirm_fn(prompt: str, _use_tg: bool) -> bool:
+                return broker.ask(account.id, prompt)
+
+            if agent is None:
+                agent = Agent(
+                    registry,
+                    settings,
+                    confirm_fn=confirm_fn,
+                    audit=audit,
+                    source=f"web:{account.id}",
+                    role=role,
+                    requester_id=account.id,
+                    user_profile=profile,
+                    devices=devices,
+                    active_device_id=device_id,
+                )
+                transcript = chats.load(account.id)
+                agent.seed_from_transcript(ChatHistory.llm_turns(transcript))
+                agents[account.id] = agent
+            else:
+                agent.confirm_fn = confirm_fn
+                agent.user_profile = profile
+                agent.active_device_id = device_id
+                agent.role = role
+                agent.client = agent._build_client()
+            return agent
 
     def _token_for(account: Account) -> str:
         payload = {
@@ -346,41 +384,46 @@ def create_app(
         ]
         return {"tools": [n for n in names if n]}
 
+    @app.get("/api/chat")
+    def get_chat(account: Account = Depends(require_account)) -> dict[str, Any]:
+        return {"messages": chats.load(account.id)}
+
+    @app.delete("/api/chat")
+    def clear_chat(account: Account = Depends(require_account)) -> dict[str, Any]:
+        chats.clear(account.id)
+        with agents_guard:
+            agent = agents.pop(account.id, None)
+            if agent is not None:
+                agent.reset()
+        return {"ok": True}
+
     @app.post("/api/chat")
     async def chat(
         body: ChatBody, account: Account = Depends(require_account)
     ) -> dict[str, Any]:
+        text = body.message.strip()
+        if not text:
+            raise HTTPException(400, "Empty message")
         lock = _lock_for(account.id)
         if not lock.acquire(blocking=False):
             raise HTTPException(409, "Already working on your previous message")
 
         def run() -> str:
             try:
-                role = Role.OWNER if account.role == "owner" else Role.FRIEND
+                agent = _agent_for(account)
                 device_id = account.resolve_device_id(devices.local_id)
-
-                def confirm_fn(prompt: str, _use_tg: bool) -> bool:
-                    # Member confirms own actions; dangerous friend tools still ACL-gated.
-                    return broker.ask(account.id, prompt)
-
-                agent = Agent(
-                    registry,
-                    settings,
-                    confirm_fn=confirm_fn,
-                    audit=audit,
-                    source=f"web:{account.id}",
-                    role=role,
-                    requester_id=account.id,
-                    user_profile=_account_to_profile(account),
-                    devices=devices,
-                    active_device_id=device_id,
-                )
                 with request_context(user_id=account.id, device_id=device_id):
-                    return agent.run(body.message.strip())
+                    return agent.run(text)
             finally:
                 lock.release()
 
-        reply = await asyncio.to_thread(run)
+        chats.append(account.id, "user", text)
+        try:
+            reply = await asyncio.to_thread(run)
+        except Exception:
+            chats.append(account.id, "system", "Chat failed — try again.")
+            raise
+        chats.append(account.id, "assistant", reply or "(empty)")
         return {"reply": reply}
 
     @app.post("/api/confirm")
@@ -460,6 +503,7 @@ def create_app(
         live = broker.notify(user_id, {"type": "reminder", "text": text})
         pushed = push.send(user_id, "Nexus Node", text)
         if live or pushed:
+            chats.append(user_id, "system", text)
             audit.log(
                 "reminder_delivered",
                 user_id=user_id,

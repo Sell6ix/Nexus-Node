@@ -26,6 +26,7 @@ from smoke_secrets import (  # noqa: E402, F401
     test_secret_box,
     test_user_store_encrypt,
 )
+from core.chat_history import ChatHistory
 from core.tls import ensure_dev_cert
 from tools.desktop_tools import _windows_toast_script, _xml_escape
 
@@ -47,3 +48,21 @@ def test_dev_tls_cert(tmp_path: Path) -> None:
     # reuse existing files
     cert2, key2 = ensure_dev_cert(tmp_path)
     assert cert2 == cert and key2 == key
+
+
+def test_chat_history_persist(tmp_path: Path) -> None:
+    store = ChatHistory(tmp_path / "chats", max_messages=50)
+    assert store.load("u1") == []
+    store.append("u1", "user", "hello")
+    store.append("u1", "assistant", "hi there")
+    store.append("u1", "system", "reminder ping")
+    rows = store.load("u1")
+    assert [r["role"] for r in rows] == ["user", "assistant", "system"]
+    assert rows[0]["text"] == "hello"
+    turns = ChatHistory.llm_turns(rows)
+    assert turns == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi there"},
+    ]
+    store.clear("u1")
+    assert store.load("u1") == []

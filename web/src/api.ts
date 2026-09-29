@@ -58,6 +58,11 @@ export const api = {
   addDevice: (body: { id: string; name: string; base_url: string; token: string }) =>
     request<{ ok: boolean }>('/api/devices', { method: 'POST', body: JSON.stringify(body) }),
   deleteDevice: (id: string) => request<{ ok: boolean }>(`/api/devices/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  getChat: () =>
+    request<{ messages: { role: 'user' | 'assistant' | 'system'; text: string; ts?: number }[] }>(
+      '/api/chat',
+    ),
+  clearChat: () => request<{ ok: boolean }>('/api/chat', { method: 'DELETE' }),
   chat: (message: string) =>
     request<{ reply: string }>('/api/chat', { method: 'POST', body: JSON.stringify({ message }) }),
   confirm: (id: string, allowed: boolean) =>

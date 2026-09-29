@@ -19,6 +19,7 @@ Phone or PC browser (PWA)
 - **Hub** (`--mode web`) — accounts, chat UI, agent, confirmations, reminders  
 - **Worker** (`--mode worker`) — extra PC that exposes tools to the hub  
 - First registered user is **owner**; others join with an **invite code** (or open signup)
+- Chat history is saved per account on the hub (`data/chats/`) and restores after reload
 
 ## Quick start
 
