@@ -437,9 +437,9 @@ function AuthScreen({
           </div>
 
           {mode === 'register' && (
-            <Field name="display_name" label="Display name" placeholder="Alex" autoComplete="nickname" />
+            <Field name="display_name" label="Display name" placeholder="Display name" autoComplete="nickname" />
           )}
-          <Field name="username" label="Username" placeholder="alex" autoComplete="username" required />
+          <Field name="username" label="Username" placeholder="Username" autoComplete="username" required />
           <Field
             name="password"
             label="Password"
