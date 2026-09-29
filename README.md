@@ -10,7 +10,7 @@ Works from **the PC console** and from a **phone via Telegram** (same agent, sam
 - **Two frontends** — local CLI (`--mode cli`) and Telegram long-polling bot (`--mode telegram` / `both`)
 - **Pairing** — phone chats must `/pair CODE` (code printed on the PC); allowlist persisted under `data/`
 - **Inbound media** — files / photos / voice from Telegram are saved to `data/inbox/`; voice can be transcribed with Whisper
-- **Safety** — `@require_confirmation` for dangerous ops; console Y/N on PC, Telegram ✅/❌ on phone
+- **Safety** — `@require_confirmation`, shell deny/allowlist, inbound size limits, JSONL audit log
 - **Tools** — ADB, Cursor, Steam/gaming, system, desktop (files/URL/notify/shell)
 
 ## Layout
@@ -82,7 +82,16 @@ python main.py -c "CPU usage?"
 python main.py --list-tools
 ```
 
-Telegram commands: `/start` `/help` `/pair CODE` `/tools` `/reset` `/status` `/inbox`
+Telegram commands: `/start` `/help` `/pair CODE` `/tools` `/reset` `/status` `/inbox` `/audit`
+
+## Safety & audit
+
+- Dangerous tools ask for confirmation (CLI Y/N or Telegram ✅/❌).
+- `run_shell` is blocked by default deny patterns (`rm -rf /`, `mkfs`, fork bombs, `shutdown`, piped `curl|sh`, …) even after confirmation.
+- Optional `SHELL_ALLOW_PREFIXES` (comma-separated) restricts shell to an allowlist.
+- Set `SHELL_ENABLED=false` to disable shell entirely.
+- Inbound Telegram files larger than `INBOUND_MAX_BYTES` (default 25 MiB) are rejected.
+- Audit trail: `data/audit.jsonl` (or `NEXUS_AUDIT_LOG`). View via Telegram `/audit` or `tail -f data/audit.jsonl`.
 
 ## Autostart (PC always listening for the phone)
 

@@ -8,6 +8,7 @@ from typing import Any
 
 from openai import OpenAI
 
+from core.audit import AuditLogger, get_audit_logger
 from core.config import Settings, load_settings
 from core.confirmation import (
     ConfirmationDenied,
@@ -17,6 +18,7 @@ from core.confirmation import (
     uses_telegram_button_hook,
 )
 from core.registry import ToolRegistry
+from core.safety import check_shell_command
 
 
 SYSTEM_PROMPT = """\
@@ -29,6 +31,21 @@ Never invent tool results — only report what tools actually returned.
 Prefer short replies that read well on a phone screen.
 """
 
+# Tools that are always written to the audit log (even when safe/read-only fails).
+AUDITED_TOOLS = frozenset(
+    {
+        "run_shell",
+        "manage_process",
+        "adb_push_file",
+        "create_project_structure",
+        "update_game_via_steamcmd",
+        "send_telegram_backup",
+        "open_url",
+        "notify_desktop",
+        "launch_steam_game",
+    }
+)
+
 
 class Agent:
     """Conversational tool-calling agent backed by the OpenAI Chat Completions API."""
@@ -40,6 +57,8 @@ class Agent:
         *,
         client: OpenAI | None = None,
         confirm_fn: Callable[[str, bool], bool] | None = None,
+        audit: AuditLogger | None = None,
+        source: str = "cli",
     ) -> None:
         self.registry = registry
         self.settings = settings or load_settings()
@@ -48,6 +67,8 @@ class Agent:
                 prompt, use_telegram_stub=use_telegram
             )
         )
+        self.audit = audit or get_audit_logger(self.settings.audit_log_path)
+        self.source = source
         self._messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
         ]
@@ -81,6 +102,11 @@ class Agent:
 
         self._messages.append({"role": "user", "content": user_command})
         tools = self.registry.openai_tools()
+        self.audit.log(
+            "user_command",
+            source=self.source,
+            text=_clip(user_command, 500),
+        )
 
         try:
             for _ in range(max_tool_rounds):
@@ -133,6 +159,7 @@ class Agent:
                 "Please try a narrower request."
             )
         except Exception as exc:  # noqa: BLE001
+            self.audit.log("agent_error", source=self.source, error=str(exc))
             return f"Agent error: {exc}"
 
     def _execute_tool_call(self, name: str, raw_arguments: str) -> str:
@@ -153,14 +180,46 @@ class Agent:
                 }
             )
 
+        should_audit = name in AUDITED_TOOLS or needs_confirmation(registered.func)
+        if should_audit:
+            self.audit.log(
+                "tool_call",
+                source=self.source,
+                tool=name,
+                args=_safe_args(validated),
+            )
+
+        # Pre-confirmation safety for shell.
+        if name == "run_shell":
+            gate = check_shell_command(
+                str(validated.get("command") or ""),
+                self.settings.safety,
+            )
+            if not gate.get("ok"):
+                self.audit.log(
+                    "safety_blocked",
+                    source=self.source,
+                    tool=name,
+                    error=gate.get("error"),
+                    blocked_by=gate.get("blocked_by"),
+                    args=_safe_args(validated),
+                )
+                return json.dumps({"ok": False, "error": gate.get("error"), "tool": name})
+
         func = registered.func
         if needs_confirmation(func):
             prompt = confirmation_message_for(func, validated)
-            # Include tool name + args so phone confirmations stay informative
-            # even when the decorator used a short static message.
-            detailed = f"{prompt}\n\nTool: {name}\nArgs: {json.dumps(validated, default=str)}"
+            detailed = (
+                f"{prompt}\n\nTool: {name}\nArgs: {json.dumps(validated, default=str)}"
+            )
             allowed = self.confirm_fn(detailed, uses_telegram_button_hook(func))
             if not allowed:
+                self.audit.log(
+                    "confirmation_denied",
+                    source=self.source,
+                    tool=name,
+                    args=_safe_args(validated),
+                )
                 return json.dumps(
                     {
                         "ok": False,
@@ -172,16 +231,52 @@ class Agent:
             try:
                 result = target(**validated)
             except Exception as exc:  # noqa: BLE001
+                self.audit.log(
+                    "tool_error",
+                    source=self.source,
+                    tool=name,
+                    error=str(exc),
+                )
                 return json.dumps({"ok": False, "error": str(exc), "tool": name})
         else:
             try:
                 result = func(**validated)
             except ConfirmationDenied as exc:
+                self.audit.log(
+                    "confirmation_denied",
+                    source=self.source,
+                    tool=name,
+                    error=str(exc),
+                    args=_safe_args(validated),
+                )
                 return json.dumps({"ok": False, "error": str(exc), "tool": name})
             except Exception as exc:  # noqa: BLE001
+                if should_audit:
+                    self.audit.log(
+                        "tool_error",
+                        source=self.source,
+                        tool=name,
+                        error=str(exc),
+                    )
                 return json.dumps({"ok": False, "error": str(exc), "tool": name})
 
-        return _serialize_result(result)
+        serialized = _serialize_result(result)
+        if should_audit:
+            ok = True
+            try:
+                parsed = json.loads(serialized)
+                if isinstance(parsed, dict) and parsed.get("ok") is False:
+                    ok = False
+            except json.JSONDecodeError:
+                pass
+            self.audit.log(
+                "tool_result",
+                source=self.source,
+                tool=name,
+                ok=ok,
+                result=_clip(serialized, 800),
+            )
+        return serialized
 
 
 def _serialize_result(result: Any) -> str:
@@ -191,3 +286,18 @@ def _serialize_result(result: Any) -> str:
     if callable(dump):
         return json.dumps(dump(), default=str)
     return json.dumps({"ok": True, "result": result}, default=str)
+
+
+def _safe_args(args: dict[str, Any]) -> dict[str, Any]:
+    """Clip long argument values for the audit log."""
+    out: dict[str, Any] = {}
+    for key, value in args.items():
+        text = value if isinstance(value, str) else json.dumps(value, default=str)
+        out[key] = _clip(str(text), 300)
+    return out
+
+
+def _clip(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"

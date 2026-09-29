@@ -194,6 +194,7 @@ def run_shell(command: str, timeout_seconds: float = 60.0) -> dict[str, Any]:
     """Run a shell command on the host PC. Requires confirmation.
 
     Dangerous: executes arbitrary commands. Prefer safer specialized tools when possible.
+    Blocked by safety policy (deny patterns / optional allowlist) even if confirmed.
 
     Args:
         command: Shell command string to execute.
@@ -203,8 +204,12 @@ def run_shell(command: str, timeout_seconds: float = 60.0) -> dict[str, Any]:
         A dict with returncode, stdout/stderr tails, or an error.
     """
     try:
-        if not command.strip():
-            return {"ok": False, "error": "command must not be empty."}
+        from core.config import load_settings
+        from core.safety import check_shell_command
+
+        gate = check_shell_command(command, load_settings().safety)
+        if not gate.get("ok"):
+            return {"ok": False, "error": gate.get("error"), "command": command}
 
         timeout = max(1.0, min(float(timeout_seconds), 600.0))
         if sys.platform.startswith("win"):

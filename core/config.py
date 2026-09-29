@@ -6,11 +6,34 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from core.safety import (
+    DEFAULT_SHELL_DENY_PATTERNS,
+    SafetyPolicy,
+    parse_csv_patterns,
+)
+
 
 def _split_ids(raw: str | None) -> set[str]:
     if not raw:
         return set()
     return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 @dataclass
@@ -26,6 +49,8 @@ class Settings:
     confirmation_timeout_seconds: float = 120.0
     inbox_dir: Path = field(default_factory=lambda: Path("data/inbox"))
     data_dir: Path = field(default_factory=lambda: Path("data"))
+    audit_log_path: Path = field(default_factory=lambda: Path("data/audit.jsonl"))
+    safety: SafetyPolicy = field(default_factory=SafetyPolicy)
     steamcmd_path: str = "steamcmd"
     adb_path: str = "adb"
     cursor_cli_path: str = "cursor"
@@ -62,6 +87,22 @@ def load_settings() -> Settings:
     root = Path(__file__).resolve().parent.parent
     data_dir = Path(os.getenv("NEXUS_DATA_DIR", str(root / "data"))).expanduser()
     inbox_dir = Path(os.getenv("NEXUS_INBOX_DIR", str(data_dir / "inbox"))).expanduser()
+    audit_log_path = Path(
+        os.getenv("NEXUS_AUDIT_LOG", str(data_dir / "audit.jsonl"))
+    ).expanduser()
+
+    deny = parse_csv_patterns(
+        os.getenv("SHELL_DENY_PATTERNS"),
+        default=DEFAULT_SHELL_DENY_PATTERNS,
+    )
+    allow = parse_csv_patterns(os.getenv("SHELL_ALLOW_PREFIXES"), default=())
+
+    safety = SafetyPolicy(
+        shell_enabled=_env_bool("SHELL_ENABLED", True),
+        shell_deny_patterns=deny,
+        shell_allow_prefixes=allow,
+        inbound_max_bytes=_env_int("INBOUND_MAX_BYTES", 25 * 1024 * 1024),
+    )
 
     return Settings(
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
@@ -73,6 +114,8 @@ def load_settings() -> Settings:
         confirmation_timeout_seconds=timeout,
         inbox_dir=inbox_dir,
         data_dir=data_dir,
+        audit_log_path=audit_log_path,
+        safety=safety,
         steamcmd_path=os.getenv("STEAMCMD_PATH", "steamcmd"),
         adb_path=os.getenv("ADB_PATH", "adb"),
         cursor_cli_path=os.getenv("CURSOR_CLI_PATH", "cursor"),

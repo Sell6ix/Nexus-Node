@@ -19,6 +19,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from core.agent import Agent
+from core.audit import get_audit_logger
 from core.config import load_settings
 from core.confirmation import (
     ConsoleGateway,
@@ -26,8 +27,8 @@ from core.confirmation import (
     TelegramGateway,
     set_confirmation_gateway,
 )
-from core.registry import ToolRegistry
 from core.pairing import PairingStore
+from core.registry import ToolRegistry
 from core.telegram_api import TelegramClient
 from core.telegram_bot import TelegramBot
 
@@ -235,7 +236,8 @@ def main(argv: list[str] | None = None) -> int:
         assert bot is not None
         bot.run_in_background()
 
-    agent = Agent(registry, settings)
+    audit = get_audit_logger(settings.audit_log_path)
+    agent = Agent(registry, settings, audit=audit, source="cli")
 
     if args.command:
         print(agent.run(args.command))

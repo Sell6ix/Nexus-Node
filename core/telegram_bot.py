@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from core.agent import Agent
+from core.audit import get_audit_logger
 from core.config import Settings
 from core.confirmation import TelegramGateway, use_confirmation_gateway
 from core.inbound import extract_media, save_telegram_media, transcribe_audio_file
@@ -28,6 +29,7 @@ Commands:
 /reset       — clear conversation memory
 /status      — PC online / config check
 /inbox       — show inbound save folder
+/audit       — last dangerous/notable actions on the PC
 
 Dangerous actions ask for ✅ Yes / ❌ No buttons here in Telegram.
 """
@@ -56,6 +58,7 @@ class TelegramBot:
             env_pair_code=settings.telegram_pair_code,
             seed_chat_ids=settings.allowed_telegram_chat_ids,
         )
+        self.audit = get_audit_logger(settings.audit_log_path)
         self._agents: dict[str, Agent] = {}
         self._gateways: dict[str, TelegramGateway] = (
             shared_gateways if shared_gateways is not None else {}
@@ -136,6 +139,8 @@ class TelegramBot:
                 self.registry,
                 self.settings,
                 confirm_fn=lambda prompt, _tg: gateway.ask(prompt),
+                audit=self.audit,
+                source=f"telegram:{chat_id}",
             )
             self._agents[key] = agent
         return agent
@@ -230,8 +235,12 @@ class TelegramBot:
         if lowered in {"/inbox", "inbox"}:
             self.client.send_message(
                 chat_id,
-                f"Inbound folder on PC:\n{self.settings.inbox_dir.resolve()}",
+                f"Inbound folder on PC:\n{self.settings.inbox_dir.resolve()}\n"
+                f"Max file size: {self.settings.safety.inbound_max_bytes} bytes",
             )
+            return
+        if lowered.startswith("/audit"):
+            self._send_audit(chat_id, text)
             return
 
         if text.startswith("/"):
@@ -272,9 +281,33 @@ class TelegramBot:
                     f"Chat: {chat_id}",
                     f"Paired chats: {len(self.pairing.allowed)}",
                     f"Inbox: {s.inbox_dir}",
+                    f"Shell: {'on' if s.safety.shell_enabled else 'OFF'}",
+                    f"Inbound max: {s.safety.inbound_max_bytes} bytes",
+                    f"Audit: {s.audit_log_path}",
                 ]
             ),
         )
+
+    def _send_audit(self, chat_id: int | str, text: str) -> None:
+        parts = text.split()
+        limit = 10
+        if len(parts) >= 2:
+            try:
+                limit = max(1, min(int(parts[1]), 50))
+            except ValueError:
+                limit = 10
+        rows = self.audit.tail(limit)
+        if not rows:
+            self.client.send_message(chat_id, "Audit log is empty.")
+            return
+        lines: list[str] = [f"Last {len(rows)} audit events:"]
+        for row in rows:
+            lines.append(
+                f"• {row.get('ts', '?')} | {row.get('event')} | "
+                f"{row.get('tool') or row.get('source') or ''} "
+                f"{(row.get('error') or row.get('text') or '')[:80]}"
+            )
+        self.client.send_message(chat_id, "\n".join(lines))
 
     def _handle_inbound_media(
         self,
@@ -289,10 +322,26 @@ class TelegramBot:
             media,
             inbox_dir=self.settings.inbox_dir,
             chat_id=chat_id,
+            policy=self.settings.safety,
         )
         if not saved.get("ok"):
+            self.audit.log(
+                "inbound_rejected",
+                source=f"telegram:{chat_id}",
+                error=saved.get("error"),
+                kind=media.get("kind"),
+                blocked_by=saved.get("blocked_by"),
+            )
             self.client.send_message(chat_id, f"Failed to save media: {saved.get('error')}")
             return
+
+        self.audit.log(
+            "inbound_saved",
+            source=f"telegram:{chat_id}",
+            kind=saved.get("kind"),
+            path=saved.get("path"),
+            size_bytes=saved.get("size_bytes"),
+        )
 
         lines = [
             f"Saved ✅ ({saved.get('kind')})",

@@ -82,11 +82,29 @@ def save_telegram_media(
     *,
     inbox_dir: Path | None = None,
     chat_id: int | str | None = None,
+    max_bytes: int | None = None,
+    policy: Any | None = None,
 ) -> dict[str, Any]:
     """Download media described by ``extract_media`` into the inbox directory."""
+    from core.safety import SafetyPolicy, check_inbound_media
+
     file_id = media.get("file_id")
     if not file_id:
         return {"ok": False, "error": "Missing file_id"}
+
+    safety_policy: SafetyPolicy
+    if policy is not None:
+        safety_policy = policy
+    else:
+        safety_policy = SafetyPolicy(
+            inbound_max_bytes=max_bytes if max_bytes is not None else 25 * 1024 * 1024
+        )
+    if max_bytes is not None and policy is None:
+        safety_policy = SafetyPolicy(inbound_max_bytes=max_bytes)
+
+    gate = check_inbound_media(media, safety_policy)
+    if not gate.get("ok"):
+        return gate
 
     root = Path(inbox_dir) if inbox_dir else default_inbox_dir()
     day = dt.datetime.now().strftime("%Y-%m-%d")
@@ -95,6 +113,10 @@ def save_telegram_media(
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     safe_name = Path(str(media.get("file_name") or "file.bin")).name
+    # Soft filename hardening: strip path tricks already via Path.name; also
+    # reject empty / weird names.
+    if not safe_name or safe_name in {".", ".."}:
+        safe_name = "file.bin"
     stamp = dt.datetime.now().strftime("%H%M%S")
     dest = dest_dir / f"{stamp}_{safe_name}"
 
@@ -109,11 +131,28 @@ def save_telegram_media(
     except OSError as exc:
         return {"ok": False, "error": str(exc)}
 
+    size = dest.stat().st_size
+    if size > safety_policy.inbound_max_bytes:
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return {
+            "ok": False,
+            "error": (
+                f"Downloaded file exceeded limit ({size} > "
+                f"{safety_policy.inbound_max_bytes}); deleted."
+            ),
+            "blocked_by": "size",
+            "file_size": size,
+            "limit": safety_policy.inbound_max_bytes,
+        }
+
     return {
         "ok": True,
         "kind": media.get("kind"),
         "path": str(dest.resolve()),
-        "size_bytes": dest.stat().st_size,
+        "size_bytes": size,
         "mime_type": media.get("mime_type"),
         "original_name": safe_name,
     }
