@@ -17,7 +17,7 @@ from core.secrets import PREFIX, SecretBox
 from core.users import UserStore
 
 
-def main() -> int:
+def test_secret_box() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         box = SecretBox(tmp_path / "secrets.key")
@@ -26,8 +26,12 @@ def main() -> int:
         assert "sk-test" not in sealed
         assert box.open(sealed) == "sk-test-secret-key"
         assert box.open("legacy-plain") == "legacy-plain"
-        print("OK secret box")
 
+
+def test_account_encrypt() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        box = SecretBox(tmp_path / "secrets.key")
         store = AccountStore(tmp_path / "accounts.json", secrets=box)
         acc = store.register("alice", "secret12", display_name="Alice")
         acc.api_key = "sk-live-not-for-disk"
@@ -39,15 +43,26 @@ def main() -> int:
         again = AccountStore(tmp_path / "accounts.json", secrets=box)
         loaded = again.get(acc.id)
         assert loaded is not None and loaded.api_key == "sk-live-not-for-disk"
-        print("OK account encrypt")
 
+
+def test_user_store_encrypt() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        box = SecretBox(tmp_path / "secrets.key")
         users = UserStore(tmp_path / "users", secrets=box)
         users.set_api_key("42", "sk-tg-legacy-key")
         disk = json.loads((tmp_path / "users" / "42.json").read_text(encoding="utf-8"))
         assert str(disk["api_key"]).startswith(PREFIX)
         assert users.get("42").api_key == "sk-tg-legacy-key"
-        print("OK user store encrypt")
 
+
+def main() -> int:
+    test_secret_box()
+    print("OK secret box")
+    test_account_encrypt()
+    print("OK account encrypt")
+    test_user_store_encrypt()
+    print("OK user store encrypt")
     print("All secrets smoke checks passed.")
     return 0
 

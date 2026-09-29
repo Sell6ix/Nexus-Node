@@ -45,7 +45,21 @@ Autostart on login:
 3. Open that URL on the phone. Add to Home Screen.
 4. Do **not** port-forward 8743 to the public internet.
 
-Closed-app reminder notifications need HTTPS. On Tailscale: `tailscale serve --bg 8743` then use the `https://<machine>.ts.net` URL, or enable notifications while the app is open on LAN HTTP.
+Closed-app reminder notifications need HTTPS:
+
+```bash
+python main.py --mode web --tls          # self-signed cert in data/certs/
+# or Tailscale: tailscale serve --bg 8743
+```
+
+Trust `data/certs/cert.pem` once in the browser (Chrome will warn). Better: Tailscale Serve with a real cert.
+
+## Tests
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
 
 Dev UI with hot reload:
 

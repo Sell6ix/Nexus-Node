@@ -120,6 +120,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dump-schemas", action="store_true")
     parser.add_argument("--host", default=None, help="Web bind host (default 0.0.0.0)")
     parser.add_argument("--port", type=int, default=None, help="Web bind port (default 8743)")
+    parser.add_argument(
+        "--tls",
+        action="store_true",
+        help="Serve HTTPS with a generated self-signed cert (enables Web Push)",
+    )
     args = parser.parse_args(argv)
 
     load_dotenv_if_present()
@@ -147,8 +152,14 @@ def main(argv: list[str] | None = None) -> int:
 
         host = args.host or os.getenv("NEXUS_WEB_HOST", "0.0.0.0")
         port = args.port or int(os.getenv("NEXUS_WEB_PORT", "8743"))
+        tls = args.tls or os.getenv("NEXUS_WEB_TLS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         try:
-            run_web_server(settings, registry, host=host, port=port)
+            run_web_server(settings, registry, host=host, port=port, tls=tls)
         except KeyboardInterrupt:
             print("\nBye.")
         return 0

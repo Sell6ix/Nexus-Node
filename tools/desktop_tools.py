@@ -132,16 +132,50 @@ def open_url(url: str) -> dict[str, Any]:
         return {"ok": False, "error": str(exc), "url": url}
 
 
+def _xml_escape(text: str) -> str:
+    return (
+        (text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+
+def _windows_toast_script(title: str, message: str) -> str:
+    """WinRT toast (non-blocking). App id is PowerShell so no extra install."""
+    t = _xml_escape(title)[:80]
+    m = _xml_escape(message)[:240]
+    xml = (
+        "<toast><visual><binding template=\"ToastGeneric\">"
+        f"<text>{t}</text><text>{m}</text>"
+        "</binding></visual></toast>"
+    )
+    # Keep XML in single-quoted PowerShell string; we already escaped quotes.
+    return (
+        "$ErrorActionPreference = 'Stop'; "
+        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; "
+        "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null; "
+        f"$xml = New-Object Windows.Data.Xml.Dom.XmlDocument; $xml.LoadXml('{xml}'); "
+        "$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'; "
+        "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml); "
+        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show($toast)"
+    )
+
+
 @tool
 def notify_desktop(title: str, message: str) -> dict[str, Any]:
     """Show a desktop notification on the host PC.
+
+    Windows uses a toast (not a blocking MessageBox). Linux: notify-send. macOS: osascript.
 
     Args:
         title: Notification title.
         message: Notification body text.
 
     Returns:
-        A dict with ok status and the backend used (notify-send / osascript / powershell).
+        A dict with ok status and the backend used.
     """
     try:
         if sys.platform.startswith("linux"):
@@ -154,28 +188,45 @@ def notify_desktop(title: str, message: str) -> dict[str, Any]:
             cmd = ["notify-send", title, message]
             backend = "notify-send"
         elif sys.platform == "darwin":
-            script = (
-                f'display notification {message!r} with title {title!r}'
-            )
+            script = f"display notification {message!r} with title {title!r}"
             cmd = ["osascript", "-e", script]
             backend = "osascript"
         elif sys.platform.startswith("win"):
-            # MessageBox keeps the dependency surface zero (no BurntToast module).
             cmd = [
                 "powershell",
                 "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
                 "-Command",
-                (
-                    "Add-Type -AssemblyName System.Windows.Forms; "
-                    f"[System.Windows.Forms.MessageBox]::Show({message!r}, {title!r}) | Out-Null"
-                ),
+                _windows_toast_script(title, message),
             ]
-            backend = "powershell-messagebox"
+            backend = "windows-toast"
         else:
             return {"ok": False, "error": f"Unsupported platform: {sys.platform}"}
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30.0, check=False)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15.0, check=False)
         if result.returncode != 0:
+            if sys.platform.startswith("win"):
+                # Auto-closing popup fallback (still not a modal app freeze).
+                fallback = (
+                    "powershell",
+                    "-NoProfile",
+                    "-WindowStyle",
+                    "Hidden",
+                    "-Command",
+                    (
+                        f"(New-Object -ComObject Wscript.Shell).Popup("
+                        f"{message!r}, 6, {title!r}, 64) | Out-Null"
+                    ),
+                )
+                fb = subprocess.run(fallback, capture_output=True, text=True, timeout=12.0, check=False)
+                if fb.returncode == 0:
+                    return {
+                        "ok": True,
+                        "backend": "wscript-popup",
+                        "title": title,
+                        "message": message,
+                    }
             return {
                 "ok": False,
                 "error": (result.stderr or result.stdout or "notify failed").strip(),

@@ -99,6 +99,9 @@ def create_app(
     registry: ToolRegistry,
     *,
     open_signup: bool | None = None,
+    tls: bool = False,
+    bind_host: str | None = None,
+    bind_port: int | None = None,
 ) -> FastAPI:
     open_signup = (
         open_signup
@@ -182,8 +185,9 @@ def create_app(
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
-        port = int(os.getenv("NEXUS_WEB_PORT", "8743"))
-        host = os.getenv("NEXUS_WEB_HOST", "0.0.0.0")
+        port = bind_port or int(os.getenv("NEXUS_WEB_PORT", "8743"))
+        host = bind_host or os.getenv("NEXUS_WEB_HOST", "0.0.0.0")
+        scheme = "https" if tls else "http"
         return {
             "ok": True,
             "product": "Nexus Node",
@@ -191,8 +195,9 @@ def create_app(
             "has_owner": accounts.has_owner,
             "open_signup": open_signup or not accounts.has_owner,
             "tools": len(registry),
-            "urls": hub_urls(host, port),
+            "urls": hub_urls(host, port, scheme=scheme),
             "push": True,
+            "tls": tls,
         }
 
     @app.post("/api/auth/register")
@@ -517,9 +522,26 @@ def run_web_server(
     *,
     host: str = "0.0.0.0",
     port: int = 8743,
+    tls: bool | None = None,
 ) -> None:
     import uvicorn
 
-    app = create_app(settings, registry)
-    print_hub_banner(host, port)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    if tls is None:
+        tls = os.getenv("NEXUS_WEB_TLS", "").strip().lower() in {"1", "true", "yes", "on"}
+    ssl_kwargs: dict[str, str] = {}
+    if tls:
+        from core.tls import ensure_dev_cert
+
+        cert, key = ensure_dev_cert(settings.data_dir)
+        ssl_kwargs = {"ssl_certfile": str(cert), "ssl_keyfile": str(key)}
+        print(f"TLS cert: {cert}")
+
+    app = create_app(
+        settings,
+        registry,
+        tls=bool(tls),
+        bind_host=host,
+        bind_port=port,
+    )
+    print_hub_banner(host, port, tls=bool(tls))
+    uvicorn.run(app, host=host, port=port, log_level="info", **ssl_kwargs)
