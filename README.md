@@ -1,150 +1,111 @@
 # Nexus Node
 
-Personal PC assistant orchestrator: natural-language commands → LLM function calling → Python tools.
+Daily personal assistant for **multiple people** and **multiple devices**.
 
-Works from **the PC console** and from a **phone via Telegram** (same agent, same tools, same confirmation gates).
+Natural language → LLM tool calling → Python tools on the chosen device.
 
-## Features
+## What you get
 
-- **Plugin tools** under `tools/` — auto-discovered, Pydantic v2 schemas, OpenAI function calling
-- **Two frontends** — local CLI (`--mode cli`) and Telegram long-polling bot (`--mode telegram` / `both`)
-- **Owner-locked Telegram** — strangers get `Unauthorized`; `/pair` rate-limited; pairing auto-locks after first owner; dangerous ✅/❌ only in the **owner** chat
-- **Inbound media** — files / photos / voice saved to `data/inbox/` (size-capped); voice via Whisper
-- **Safety** — `@require_confirmation`, shell deny/allowlist, inbound limits, JSONL audit log
-- **Tools** — ADB, Cursor, Steam/gaming, system, desktop (files/URL/notify/shell)
+- **BYOK** — each Telegram user sets their own AI key (`/apikey`), model, and OpenAI-compatible `/baseurl`
+- **Multi-device** — hub PC runs Telegram; other PCs run `--mode worker`; pick with `/use`
+- **Security** — owner-locked pairing, one-time `/invite` for friends, owner-only confirmations, shell/inbound gates, audit log, secret redaction
+- **Daily tools** — notes, todos, reminders (+ system/ADB/Steam/desktop tools)
+
+## Modes
+
+| Mode | Command | Role |
+|------|---------|------|
+| CLI | `python main.py` | Local console on this PC |
+| Telegram hub | `python main.py --mode telegram` | Phone control + device routing |
+| Both | `python main.py --mode both` | CLI + Telegram |
+| Worker | `python main.py --mode worker` | Expose this PC’s tools to the hub |
+
+## Quick start (one PC + phone)
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+# set TELEGRAM_BOT_TOKEN, DEVICE_ID, DEVICE_NAME
+python main.py --mode telegram
+```
+
+In Telegram:
+
+```text
+/whoami
+/pair <code-from-console>
+/apikey sk-...
+/model gpt-4o-mini
+What's on my todo list?
+```
+
+Put `TELEGRAM_OWNER_CHAT_ID=<your id>` into `.env` and restart.
+
+## Second device (friend’s PC or your laptop)
+
+On the **worker** PC:
+
+```env
+DEVICE_ID=laptop
+DEVICE_NAME=Laptop
+WORKER_TOKEN=long-random-secret
+WORKER_HOST=0.0.0.0
+WORKER_PORT=8765
+```
+
+```bash
+python main.py --mode worker
+```
+
+On the **hub** (owner Telegram):
+
+```text
+/device_add laptop Laptop http://192.168.x.x:8765 long-random-secret
+/use laptop
+show system stats
+```
+
+Worker defaults to localhost; use `0.0.0.0` only on trusted LAN and keep the token secret. Dangerous confirmed tools still run on the hub for now.
+
+## Invite a friend (their own key, limited tools)
+
+Owner:
+
+```text
+/invite sam
+```
+
+Friend (privately):
+
+```text
+/pair <invite-code>
+/apikey sk-friend-key
+```
+
+Friends cannot use `run_shell`, file push, steamcmd update, etc. Kill-process is owner-only. Dangerous actions still ask **you** (owner) for ✅/❌.
+
+## Daily tools
+
+`add_note` `list_notes` `add_todo` `list_todos` `complete_todo` `set_reminder` `list_reminders`
+
+Plus existing ADB / Cursor / Steam / system / desktop tools.
+
+## Security checklist
+
+1. Keep bot username private  
+2. Set `TELEGRAM_OWNER_CHAT_ID`  
+3. Prefer `/invite` over `/unlock`  
+4. Each person uses `/apikey` (keys stored under `data/users/`, never shared)  
+5. Worker tokens are long and unique; prefer LAN-only bind  
+6. Watch `/audit`
 
 ## Layout
 
 ```
 main.py
-core/                   # agent, confirmation, registry, telegram, pairing, inbound
-tools/                  # auto-discovered plugins
-scripts/                # autostart helpers (systemd / Scheduled Task)
-data/                   # pair code, allowlist, inbox (gitignored)
-requirements.txt
-.env.example
+core/          agent, users (BYOK), devices, worker, pairing, safety, audit…
+tools/         plugins (auto-discovered)
+data/          users, devices, inbox, audit, daily notes (gitignored)
+scripts/       autostart helpers
 ```
-
-## Phone + PC model
-
-The orchestrator **always runs on the PC**.
-
-| You are on… | How you talk to it |
-|-------------|--------------------|
-| PC | `python main.py` |
-| Phone | `python main.py --mode telegram` on the PC, then `/pair CODE` in Telegram |
-| Both | `python main.py --mode both` |
-
-### Security model (important)
-
-**Anyone who can find your bot username can message it — but that must not mean they control your PC.**
-
-| Layer | Behavior |
-|-------|----------|
-| Stranger DM | Reply `Unauthorized.` + notify owner; no pair instructions |
-| `/pair CODE` | 10-char secret from PC console; 5 fails → 15 min lockout |
-| After first pair | Pairing **locks**; code rotates |
-| Owner | `TELEGRAM_OWNER_CHAT_ID` (recommended) or first successful `/pair` |
-| Dangerous tools | ✅/❌ buttons go **only to the owner chat** (attacker cannot self-approve) |
-| `/audit` `/lock` `/unlock` `/revoke` | Owner only |
-
-Recommended `.env`:
-
-```env
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_OWNER_CHAT_ID=123456789   # from /whoami
-TELEGRAM_CHAT_ID=123456789
-SHELL_ENABLED=true
-```
-
-Keep the bot username private. Prefer BotFather settings that limit group adds. Do not share pair codes from logs.
-
-### Pairing
-
-1. Start Telegram mode — console prints a **secret** pair code
-2. From **your** phone: `/whoami` then `/pair CODE`
-3. Put `TELEGRAM_OWNER_CHAT_ID=<your id>` into `.env` and restart
-4. Pairing stays locked; use owner `/unlock` only to add another trusted chat
-
-### Inbound from phone
-
-Send a document, photo, audio, or voice note:
-
-- Saved under `data/inbox/<chat_id>/<date>/…`
-- Voice/audio transcribed with OpenAI Whisper when `OPENAI_API_KEY` is set
-- Caption or transcript is forwarded to the agent (with the saved path attached)
-
-## Setup
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env
-# Set OPENAI_API_KEY and TELEGRAM_BOT_TOKEN
-```
-
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `OPENAI_API_KEY` | for chat / whisper | OpenAI |
-| `OPENAI_MODEL` | no | Default `gpt-4o-mini` |
-| `TELEGRAM_BOT_TOKEN` | phone | BotFather token |
-| `TELEGRAM_CHAT_ID` | no | Pre-seed allowlist + backup target |
-| `TELEGRAM_ALLOWED_CHAT_IDS` | no | Extra allowlist ids |
-| `TELEGRAM_PAIR_CODE` | no | Fixed pair code |
-| `NEXUS_INBOX_DIR` | no | Override inbound folder |
-| `CONFIRMATION_TIMEOUT_SECONDS` | no | Default `120` |
-
-## Run
-
-```bash
-python main.py                      # PC console
-python main.py --mode telegram      # phone bot
-python main.py --mode both          # both
-python main.py -c "CPU usage?"
-python main.py --list-tools
-```
-
-Telegram commands: `/start` `/help` `/pair CODE` `/tools` `/reset` `/status` `/inbox` `/audit`
-
-## Safety & audit
-
-- Dangerous tools ask for confirmation (CLI Y/N or Telegram ✅/❌).
-- `run_shell` is blocked by default deny patterns (`rm -rf /`, `mkfs`, fork bombs, `shutdown`, piped `curl|sh`, …) even after confirmation.
-- Optional `SHELL_ALLOW_PREFIXES` (comma-separated) restricts shell to an allowlist.
-- Set `SHELL_ENABLED=false` to disable shell entirely.
-- Inbound Telegram files larger than `INBOUND_MAX_BYTES` (default 25 MiB) are rejected.
-- Audit trail: `data/audit.jsonl` (or `NEXUS_AUDIT_LOG`). View via Telegram `/audit` or `tail -f data/audit.jsonl`.
-
-## Autostart (PC always listening for the phone)
-
-**Linux (systemd user):**
-
-```bash
-chmod +x scripts/install-autostart-linux.sh
-./scripts/install-autostart-linux.sh
-# logs: journalctl --user -u nexus-node.service -f
-```
-
-**Windows (Scheduled Task at logon):**
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install-autostart-windows.ps1
-```
-
-## Confirmation
-
-Dangerous tools (ADB push, scaffold, steamcmd, `run_shell`, process kill, …) ask before running:
-
-- **CLI** — `Proceed? [y/N]`
-- **Telegram** — ✅ / ❌ (timeout = deny)
-
-## Adding a tool
-
-1. Add a function under `tools/` with `@tool` (+ `@require_confirmation` if dangerous).
-2. Type annotations + docstring with `Args:`.
-3. Restart — discovery is automatic.
-
-## License
-
-MIT-style for personal use; bring your own API keys and device access.

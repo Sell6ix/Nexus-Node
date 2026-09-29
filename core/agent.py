@@ -1,4 +1,4 @@
-"""OpenAI-powered agent loop: command → tool selection → confirm → execute → reply."""
+"""OpenAI-powered agent loop with BYOK, roles, and multi-device tool routing."""
 
 from __future__ import annotations
 
@@ -17,21 +17,21 @@ from core.confirmation import (
     needs_confirmation,
     uses_telegram_button_hook,
 )
+from core.devices import Device, DeviceRegistry, execute_remote_tool
+from core.permissions import PermissionPolicy, Role, check_tool_permission
 from core.registry import ToolRegistry
 from core.safety import check_shell_command
+from core.users import UserProfile, redact_secrets
 
 
 SYSTEM_PROMPT = """\
-You are Nexus Node, a personal assistant orchestrator running on the user's PC.
-The user may talk to you from the local CLI or remotely from their phone via Telegram.
-You help by selecting and calling the provided Python tools.
-Be concise, practical, and honest about failures or missing dependencies.
-When a tool result is enough to answer, summarize it clearly for the user.
-Never invent tool results — only report what tools actually returned.
-Prefer short replies that read well on a phone screen.
+You are Nexus Node, a personal assistant for daily tasks on the user's devices.
+Users may talk from CLI or Telegram. Each person can use their own AI API key.
+Help by calling the provided tools. Be concise and honest about failures.
+Never invent tool results. Prefer short replies that read well on a phone.
+If a tool is unavailable for this user's role or device, say so briefly.
 """
 
-# Tools that are always written to the audit log (even when safe/read-only fails).
 AUDITED_TOOLS = frozenset(
     {
         "run_shell",
@@ -48,7 +48,7 @@ AUDITED_TOOLS = frozenset(
 
 
 class Agent:
-    """Conversational tool-calling agent backed by the OpenAI Chat Completions API."""
+    """Conversational tool-calling agent."""
 
     def __init__(
         self,
@@ -59,6 +59,11 @@ class Agent:
         confirm_fn: Callable[[str, bool], bool] | None = None,
         audit: AuditLogger | None = None,
         source: str = "cli",
+        role: Role = Role.OWNER,
+        requester_id: str | None = None,
+        user_profile: UserProfile | None = None,
+        devices: DeviceRegistry | None = None,
+        active_device_id: str | None = None,
     ) -> None:
         self.registry = registry
         self.settings = settings or load_settings()
@@ -69,56 +74,92 @@ class Agent:
         )
         self.audit = audit or get_audit_logger(self.settings.audit_log_path)
         self.source = source
+        self.role = role
+        self.requester_id = requester_id or source
+        self.permissions: PermissionPolicy = self.settings.permissions
+        self.user_profile = user_profile
+        self.devices = devices
+        self.active_device_id = active_device_id
+
+        role_note = f"\nActive role: {self.role.value}."
+        if self.role == Role.FRIEND:
+            role_note += " Friend operators have a restricted tool set."
+        device = self._resolve_device()
+        if device:
+            role_note += f"\nActive device: {device.id} ({device.name})."
+
         self._messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": SYSTEM_PROMPT + role_note},
         ]
 
         if client is not None:
             self.client = client
-        elif self.settings.has_openai:
-            self.client = OpenAI(api_key=self.settings.openai_api_key)
         else:
-            self.client = None
+            self.client = self._build_client()
+
+    def _build_client(self) -> OpenAI | None:
+        api_key = None
+        base_url = self.settings.openai_base_url
+        if self.user_profile and self.user_profile.api_key:
+            api_key = self.user_profile.api_key
+            if self.user_profile.api_base_url:
+                base_url = self.user_profile.api_base_url
+        elif self.settings.openai_api_key:
+            api_key = self.settings.openai_api_key
+        if not api_key:
+            return None
+        kwargs: dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        return OpenAI(**kwargs)
+
+    def _model(self) -> str:
+        if self.user_profile and self.user_profile.model:
+            return self.user_profile.model
+        return self.settings.openai_model
+
+    def _resolve_device(self) -> Device | None:
+        if self.devices is None:
+            return None
+        return self.devices.get(self.active_device_id or self.devices.local_id)
 
     @property
     def ready(self) -> bool:
         return self.client is not None and len(self.registry) > 0
 
     def reset(self) -> None:
-        """Clear conversation history (keeps the system prompt)."""
-        self._messages = [self._messages[0]]
+        first = self._messages[0]
+        self._messages = [first]
 
     def run(self, user_command: str, *, max_tool_rounds: int = 8) -> str:
-        """Process one user command through the tool-calling loop.
-
-        Returns the final assistant reply text.
-        """
         if self.client is None:
             return (
-                "OPENAI_API_KEY is not set. Export it (or place it in a .env file) "
-                "and restart. Tip: run `python main.py --list-tools` to inspect "
-                "available tools without an API key."
+                "No AI API key configured for this user.\n"
+                "• Telegram: /apikey YOUR_KEY (optional /baseurl /model)\n"
+                "• Or set OPENAI_API_KEY in the host .env and restart.\n"
+                "OpenAI-compatible providers work via /baseurl."
             )
 
         self._messages.append({"role": "user", "content": user_command})
-        tools = self.registry.openai_tools()
+        tools = self._tools_for_role()
         self.audit.log(
             "user_command",
             source=self.source,
-            text=_clip(user_command, 500),
+            role=self.role.value,
+            requester=self.requester_id,
+            device=(self._resolve_device().id if self._resolve_device() else None),
+            text=redact_secrets(_clip(user_command, 500)),
         )
 
         try:
             for _ in range(max_tool_rounds):
                 response = self.client.chat.completions.create(
-                    model=self.settings.openai_model,
+                    model=self._model(),
                     messages=self._messages,
                     tools=tools or None,
                     tool_choice="auto" if tools else None,
                 )
-                choice = response.choices[0]
-                message = choice.message
-
+                message = response.choices[0].message
                 assistant_message: dict[str, Any] = {
                     "role": "assistant",
                     "content": message.content or "",
@@ -138,8 +179,7 @@ class Agent:
                 self._messages.append(assistant_message)
 
                 if not message.tool_calls:
-                    reply = (message.content or "").strip() or "(No response.)"
-                    return reply
+                    return (message.content or "").strip() or "(No response.)"
 
                 for tool_call in message.tool_calls:
                     result_text = self._execute_tool_call(
@@ -154,13 +194,27 @@ class Agent:
                         }
                     )
 
-            return (
-                "Stopped after the maximum number of tool rounds. "
-                "Please try a narrower request."
-            )
+            return "Stopped after the maximum number of tool rounds."
         except Exception as exc:  # noqa: BLE001
-            self.audit.log("agent_error", source=self.source, error=str(exc))
-            return f"Agent error: {exc}"
+            self.audit.log(
+                "agent_error",
+                source=self.source,
+                error=redact_secrets(str(exc)),
+            )
+            return f"Agent error: {redact_secrets(str(exc))}"
+
+    def _tools_for_role(self) -> list[dict[str, Any]]:
+        all_tools = self.registry.openai_tools()
+        if self.role == Role.OWNER:
+            return all_tools
+        allowed_names = set(self.permissions.friend_allow_tools) - set(
+            self.permissions.friend_deny_tools
+        )
+        return [
+            t
+            for t in all_tools
+            if t.get("function", {}).get("name") in allowed_names
+        ]
 
     def _execute_tool_call(self, name: str, raw_arguments: str) -> str:
         registered = self.registry.get(name)
@@ -173,44 +227,57 @@ class Agent:
                 raise ValueError("Tool arguments must be a JSON object.")
             validated = registered.parse_arguments(arguments)
         except Exception as exc:  # noqa: BLE001
-            return json.dumps(
-                {
-                    "ok": False,
-                    "error": f"Invalid arguments for '{name}': {exc}",
-                }
+            return json.dumps({"ok": False, "error": f"Invalid arguments for '{name}': {exc}"})
+
+        perm = check_tool_permission(
+            role=self.role,
+            tool_name=name,
+            arguments=validated,
+            policy=self.permissions,
+        )
+        if not perm.get("ok"):
+            self.audit.log(
+                "permission_denied",
+                source=self.source,
+                role=self.role.value,
+                requester=self.requester_id,
+                tool=name,
+                error=perm.get("error"),
             )
+            return json.dumps({"ok": False, "error": perm.get("error"), "tool": name})
 
         should_audit = name in AUDITED_TOOLS or needs_confirmation(registered.func)
         if should_audit:
             self.audit.log(
                 "tool_call",
                 source=self.source,
+                role=self.role.value,
+                requester=self.requester_id,
                 tool=name,
                 args=_safe_args(validated),
             )
 
-        # Pre-confirmation safety for shell.
         if name == "run_shell":
-            gate = check_shell_command(
-                str(validated.get("command") or ""),
-                self.settings.safety,
-            )
+            gate = check_shell_command(str(validated.get("command") or ""), self.settings.safety)
             if not gate.get("ok"):
                 self.audit.log(
                     "safety_blocked",
                     source=self.source,
                     tool=name,
                     error=gate.get("error"),
-                    blocked_by=gate.get("blocked_by"),
-                    args=_safe_args(validated),
                 )
                 return json.dumps({"ok": False, "error": gate.get("error"), "tool": name})
 
         func = registered.func
+        device = self._resolve_device()
+
         if needs_confirmation(func):
             prompt = confirmation_message_for(func, validated)
             detailed = (
-                f"{prompt}\n\nTool: {name}\nArgs: {json.dumps(validated, default=str)}"
+                f"{prompt}\n\n"
+                f"Requested by: {self.requester_id} (role={self.role.value})\n"
+                f"Device: {device.id if device else 'local'}\n"
+                f"Tool: {name}\nArgs: {json.dumps(validated, default=str)}"
             )
             allowed = self.confirm_fn(detailed, uses_telegram_button_hook(func))
             if not allowed:
@@ -221,43 +288,33 @@ class Agent:
                     args=_safe_args(validated),
                 )
                 return json.dumps(
-                    {
-                        "ok": False,
-                        "error": "User denied confirmation.",
-                        "tool": name,
-                    }
+                    {"ok": False, "error": "User denied confirmation.", "tool": name}
                 )
+            # Confirmed dangerous tools currently execute on the hub/local process only.
             target = getattr(func, "__wrapped__", func)
             try:
                 result = target(**validated)
             except Exception as exc:  # noqa: BLE001
-                self.audit.log(
-                    "tool_error",
-                    source=self.source,
-                    tool=name,
-                    error=str(exc),
-                )
+                self.audit.log("tool_error", source=self.source, tool=name, error=str(exc))
                 return json.dumps({"ok": False, "error": str(exc), "tool": name})
         else:
             try:
-                result = func(**validated)
+                if device is not None and not device.is_local:
+                    remote = execute_remote_tool(device, name, validated)
+                    result = remote
+                else:
+                    result = func(**validated)
             except ConfirmationDenied as exc:
                 self.audit.log(
                     "confirmation_denied",
                     source=self.source,
                     tool=name,
                     error=str(exc),
-                    args=_safe_args(validated),
                 )
                 return json.dumps({"ok": False, "error": str(exc), "tool": name})
             except Exception as exc:  # noqa: BLE001
                 if should_audit:
-                    self.audit.log(
-                        "tool_error",
-                        source=self.source,
-                        tool=name,
-                        error=str(exc),
-                    )
+                    self.audit.log("tool_error", source=self.source, tool=name, error=str(exc))
                 return json.dumps({"ok": False, "error": str(exc), "tool": name})
 
         serialized = _serialize_result(result)
@@ -274,7 +331,7 @@ class Agent:
                 source=self.source,
                 tool=name,
                 ok=ok,
-                result=_clip(serialized, 800),
+                result=_clip(redact_secrets(serialized), 800),
             )
         return serialized
 
@@ -289,11 +346,10 @@ def _serialize_result(result: Any) -> str:
 
 
 def _safe_args(args: dict[str, Any]) -> dict[str, Any]:
-    """Clip long argument values for the audit log."""
     out: dict[str, Any] = {}
     for key, value in args.items():
         text = value if isinstance(value, str) else json.dumps(value, default=str)
-        out[key] = _clip(str(text), 300)
+        out[key] = _clip(redact_secrets(str(text)), 300)
     return out
 
 

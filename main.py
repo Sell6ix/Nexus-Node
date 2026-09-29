@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Nexus Node — personal assistant orchestrator.
+"""Nexus Node — multi-device daily assistant.
 
 Modes:
-  cli       — local console on the PC (default)
-  telegram  — control the same PC agent from a phone via Telegram
-  both      — CLI + Telegram together (confirmations can use phone buttons)
+  cli       — local console
+  telegram  — Telegram hub (phone control)
+  both      — CLI + Telegram
+  worker    — expose local tools to a hub over HTTP
 """
 
 from __future__ import annotations
@@ -27,10 +28,14 @@ from core.confirmation import (
     TelegramGateway,
     set_confirmation_gateway,
 )
+from core.devices import DeviceRegistry
 from core.pairing import PairingStore
+from core.permissions import Role
 from core.registry import ToolRegistry
 from core.telegram_api import TelegramClient
 from core.telegram_bot import TelegramBot
+from core.users import UserStore
+from core.worker import WorkerServer
 
 
 def build_registry() -> ToolRegistry:
@@ -60,22 +65,15 @@ def print_tools(registry: ToolRegistry) -> None:
     print()
 
 
-def print_schemas(registry: ToolRegistry) -> None:
-    print(json.dumps(registry.openai_tools(), indent=2))
-
-
 def run_repl(agent: Agent) -> int:
     settings = agent.settings
-    print("Nexus Node — personal assistant orchestrator")
+    print("Nexus Node — daily assistant")
+    print(f"Device: {settings.device_id} ({settings.device_name})")
     print(f"Model: {settings.openai_model}")
-    print(f"OpenAI: {'configured' if settings.has_openai else 'MISSING (set OPENAI_API_KEY)'}")
+    print(f"OpenAI/.env key: {'yes' if settings.has_openai else 'no (users can /apikey in Telegram)'}")
     print(
         "Telegram: "
-        + (
-            "bot ready"
-            if settings.has_telegram_bot
-            else "not configured (set TELEGRAM_BOT_TOKEN for phone access)"
-        )
+        + ("bot ready" if settings.has_telegram_bot else "not configured")
     )
     print(f"Tools: {len(agent.registry)}")
     print("Type a command, or 'help' / 'tools' / 'reset' / 'exit'.\n")
@@ -86,7 +84,6 @@ def run_repl(agent: Agent) -> int:
         except (EOFError, KeyboardInterrupt):
             print("\nBye.")
             return 0
-
         if not user_input:
             continue
         lowered = user_input.lower()
@@ -96,13 +93,10 @@ def run_repl(agent: Agent) -> int:
         if lowered == "help":
             print(
                 "Commands:\n"
-                "  <text>   — send to the agent\n"
-                "  tools    — list registered tools\n"
-                "  reset    — clear conversation memory\n"
-                "  exit     — quit\n"
-                "\n"
-                "Phone access: run `python main.py --mode telegram` on this PC,\n"
-                "then send /pair CODE from Telegram (code is printed on start).\n"
+                "  <text> — agent\n"
+                "  tools / reset / exit\n"
+                "Phone: python main.py --mode telegram\n"
+                "Other PC worker: python main.py --mode worker\n"
             )
             continue
         if lowered == "tools":
@@ -112,50 +106,19 @@ def run_repl(agent: Agent) -> int:
             agent.reset()
             print("Conversation reset.\n")
             continue
-
-        reply = agent.run(user_input)
-        print(f"\nassistant> {reply}\n")
-
-
-def _build_telegram_gateway(settings) -> tuple[TelegramClient, dict[str, TelegramGateway]] | None:
-    if not settings.has_telegram_bot:
-        return None
-    client = TelegramClient(settings.telegram_bot_token)
-    gateways: dict[str, TelegramGateway] = {}
-    if settings.telegram_chat_id:
-        gateways[str(settings.telegram_chat_id)] = TelegramGateway(
-            client=client,
-            chat_id=settings.telegram_chat_id,
-            timeout_seconds=settings.confirmation_timeout_seconds,
-        )
-    return client, gateways
+        print(f"\nassistant> {agent.run(user_input)}\n")
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Nexus Node personal assistant orchestrator (PC CLI + Telegram phone)",
-    )
-    parser.add_argument(
-        "-c",
-        "--command",
-        help="Run a single natural-language command and exit",
-    )
+    parser = argparse.ArgumentParser(description="Nexus Node multi-device assistant")
+    parser.add_argument("-c", "--command", help="Run one command and exit")
     parser.add_argument(
         "--mode",
-        choices=("cli", "telegram", "both"),
+        choices=("cli", "telegram", "both", "worker"),
         default="cli",
-        help="cli=local console, telegram=phone bot, both=CLI+Telegram together",
     )
-    parser.add_argument(
-        "--list-tools",
-        action="store_true",
-        help="List auto-discovered tools and exit",
-    )
-    parser.add_argument(
-        "--dump-schemas",
-        action="store_true",
-        help="Print OpenAI function-calling schemas as JSON and exit",
-    )
+    parser.add_argument("--list-tools", action="store_true")
+    parser.add_argument("--dump-schemas", action="store_true")
     args = parser.parse_args(argv)
 
     load_dotenv_if_present()
@@ -165,30 +128,75 @@ def main(argv: list[str] | None = None) -> int:
         print_tools(registry)
         return 0
     if args.dump_schemas:
-        print_schemas(registry)
+        print(json.dumps(registry.openai_tools(), indent=2))
         return 0
 
     settings = load_settings()
+    devices = DeviceRegistry(
+        settings.devices_path,
+        local_id=settings.device_id,
+        local_name=settings.device_name,
+        local_token=settings.worker_token,
+    )
+    users = UserStore(settings.users_dir)
+    audit = get_audit_logger(settings.audit_log_path)
 
-    if args.mode in {"telegram", "both"}:
-        if not settings.has_telegram_bot:
+    if args.mode == "worker":
+        if not settings.worker_token:
             print(
-                "TELEGRAM_BOT_TOKEN is required for --mode telegram/both.\n"
-                "Create a bot via @BotFather, put the token in .env, then retry.",
+                "WORKER_TOKEN (or DEVICE_TOKEN) is required for --mode worker.\n"
+                "Generate a long random string and put the same value on the hub via /device_add.",
                 file=sys.stderr,
             )
             return 2
+        worker = WorkerServer(
+            registry,
+            token=settings.worker_token,
+            host=settings.worker_host,
+            port=settings.worker_port,
+            device_id=settings.device_id,
+            device_name=settings.device_name,
+        )
+        try:
+            worker.serve_forever()
+        except KeyboardInterrupt:
+            print("\nBye.")
+            worker.stop()
+        return 0
+
+    if args.mode in {"telegram", "both"} and not settings.has_telegram_bot:
+        print(
+            "TELEGRAM_BOT_TOKEN is required for --mode telegram/both.",
+            file=sys.stderr,
+        )
+        return 2
 
     shared_gateways: dict[str, TelegramGateway] = {}
     tg_client: TelegramClient | None = None
-    if args.mode in {"telegram", "both"}:
-        tg_bundle = _build_telegram_gateway(settings)
-        if tg_bundle is None:
-            print("Failed to initialize Telegram client.", file=sys.stderr)
-            return 2
-        tg_client, shared_gateways = tg_bundle
+    pairing: PairingStore | None = None
 
-    # In CLI/both, prefer Telegram buttons when a chat is configured and bot is running.
+    if args.mode in {"telegram", "both"}:
+        tg_client = TelegramClient(settings.telegram_bot_token)  # type: ignore[arg-type]
+        pairing = PairingStore(
+            data_dir=settings.data_dir,
+            env_pair_code=settings.telegram_pair_code,
+            seed_chat_ids=settings.allowed_telegram_chat_ids,
+            owner_chat_id=settings.owner_chat_id,
+            pairing_open=settings.telegram_pairing_open,
+            max_pair_attempts=settings.pair_max_attempts,
+            pair_lockout_seconds=settings.pair_lockout_seconds,
+            max_friends=settings.max_friends,
+        )
+        print(f"Device: {settings.device_id} ({settings.device_name})")
+        print(f"Telegram pair code (secret): {pairing.pair_code}")
+        print(f"Owner chat: {pairing.owner_chat_id or '(none yet)'}")
+        if settings.telegram_chat_id:
+            shared_gateways[str(settings.telegram_chat_id)] = TelegramGateway(
+                client=tg_client,
+                chat_id=settings.telegram_chat_id,
+                timeout_seconds=settings.confirmation_timeout_seconds,
+            )
+
     if args.mode == "both" and settings.telegram_chat_id and tg_client is not None:
         primary = shared_gateways.setdefault(
             str(settings.telegram_chat_id),
@@ -202,23 +210,6 @@ def main(argv: list[str] | None = None) -> int:
     elif args.mode == "cli":
         set_confirmation_gateway(ConsoleGateway())
 
-    pairing: PairingStore | None = None
-    if args.mode in {"telegram", "both"}:
-        pairing = PairingStore(
-            data_dir=settings.data_dir,
-            env_pair_code=settings.telegram_pair_code,
-            seed_chat_ids=settings.allowed_telegram_chat_ids,
-            owner_chat_id=settings.owner_chat_id,
-            pairing_open=settings.telegram_pairing_open,
-            max_pair_attempts=settings.pair_max_attempts,
-            pair_lockout_seconds=settings.pair_lockout_seconds,
-        )
-        print(f"Telegram pair code (secret): {pairing.pair_code}")
-        print(f"Owner chat: {pairing.owner_chat_id or '(none yet)'}")
-        print(f"Pairing open: {pairing.pairing_open}")
-        print(f"Paired chats file: {pairing.allowed_path}")
-        print(f"Inbound inbox: {settings.inbox_dir.resolve()}")
-
     bot: TelegramBot | None = None
     if args.mode in {"telegram", "both"}:
         bot = TelegramBot(
@@ -227,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
             client=tg_client,
             shared_gateways=shared_gateways,
             pairing=pairing,
+            users=users,
+            devices=devices,
         )
 
     if args.mode == "telegram":
@@ -242,8 +235,15 @@ def main(argv: list[str] | None = None) -> int:
         assert bot is not None
         bot.run_in_background()
 
-    audit = get_audit_logger(settings.audit_log_path)
-    agent = Agent(registry, settings, audit=audit, source="cli")
+    agent = Agent(
+        registry,
+        settings,
+        audit=audit,
+        source="cli",
+        role=Role.OWNER,
+        devices=devices,
+        active_device_id=settings.device_id,
+    )
 
     if args.command:
         print(agent.run(args.command))
