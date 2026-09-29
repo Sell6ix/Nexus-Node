@@ -208,8 +208,14 @@ def main(argv: list[str] | None = None) -> int:
             data_dir=settings.data_dir,
             env_pair_code=settings.telegram_pair_code,
             seed_chat_ids=settings.allowed_telegram_chat_ids,
+            owner_chat_id=settings.owner_chat_id,
+            pairing_open=settings.telegram_pairing_open,
+            max_pair_attempts=settings.pair_max_attempts,
+            pair_lockout_seconds=settings.pair_lockout_seconds,
         )
-        print(f"Telegram pair code: {pairing.pair_code}")
+        print(f"Telegram pair code (secret): {pairing.pair_code}")
+        print(f"Owner chat: {pairing.owner_chat_id or '(none yet)'}")
+        print(f"Pairing open: {pairing.pairing_open}")
         print(f"Paired chats file: {pairing.allowed_path}")
         print(f"Inbound inbox: {settings.inbox_dir.resolve()}")
 

@@ -44,8 +44,12 @@ class Settings:
     openai_model: str
     telegram_bot_token: str | None
     telegram_chat_id: str | None
+    telegram_owner_chat_id: str | None = None
     telegram_allowed_chat_ids: set[str] = field(default_factory=set)
     telegram_pair_code: str | None = None
+    telegram_pairing_open: bool | None = None
+    pair_max_attempts: int = 5
+    pair_lockout_seconds: float = 900.0
     confirmation_timeout_seconds: float = 120.0
     inbox_dir: Path = field(default_factory=lambda: Path("data/inbox"))
     data_dir: Path = field(default_factory=lambda: Path("data"))
@@ -73,7 +77,13 @@ class Settings:
         ids = set(self.telegram_allowed_chat_ids)
         if self.telegram_chat_id:
             ids.add(str(self.telegram_chat_id))
+        if self.telegram_owner_chat_id:
+            ids.add(str(self.telegram_owner_chat_id))
         return ids
+
+    @property
+    def owner_chat_id(self) -> str | None:
+        return self.telegram_owner_chat_id or self.telegram_chat_id
 
 
 def load_settings() -> Settings:
@@ -104,13 +114,24 @@ def load_settings() -> Settings:
         inbound_max_bytes=_env_int("INBOUND_MAX_BYTES", 25 * 1024 * 1024),
     )
 
+    pairing_open_raw = os.getenv("TELEGRAM_PAIRING_OPEN")
+    pairing_open: bool | None
+    if pairing_open_raw is None or not pairing_open_raw.strip():
+        pairing_open = None
+    else:
+        pairing_open = pairing_open_raw.strip().lower() in {"1", "true", "yes", "on"}
+
     return Settings(
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID") or None,
+        telegram_owner_chat_id=os.getenv("TELEGRAM_OWNER_CHAT_ID") or None,
         telegram_allowed_chat_ids=_split_ids(os.getenv("TELEGRAM_ALLOWED_CHAT_IDS")),
         telegram_pair_code=(os.getenv("TELEGRAM_PAIR_CODE") or None),
+        telegram_pairing_open=pairing_open,
+        pair_max_attempts=_env_int("TELEGRAM_PAIR_MAX_ATTEMPTS", 5),
+        pair_lockout_seconds=float(_env_int("TELEGRAM_PAIR_LOCKOUT_SECONDS", 900)),
         confirmation_timeout_seconds=timeout,
         inbox_dir=inbox_dir,
         data_dir=data_dir,

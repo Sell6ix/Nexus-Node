@@ -8,9 +8,9 @@ Works from **the PC console** and from a **phone via Telegram** (same agent, sam
 
 - **Plugin tools** under `tools/` — auto-discovered, Pydantic v2 schemas, OpenAI function calling
 - **Two frontends** — local CLI (`--mode cli`) and Telegram long-polling bot (`--mode telegram` / `both`)
-- **Pairing** — phone chats must `/pair CODE` (code printed on the PC); allowlist persisted under `data/`
-- **Inbound media** — files / photos / voice from Telegram are saved to `data/inbox/`; voice can be transcribed with Whisper
-- **Safety** — `@require_confirmation`, shell deny/allowlist, inbound size limits, JSONL audit log
+- **Owner-locked Telegram** — strangers get `Unauthorized`; `/pair` rate-limited; pairing auto-locks after first owner; dangerous ✅/❌ only in the **owner** chat
+- **Inbound media** — files / photos / voice saved to `data/inbox/` (size-capped); voice via Whisper
+- **Safety** — `@require_confirmation`, shell deny/allowlist, inbound limits, JSONL audit log
 - **Tools** — ADB, Cursor, Steam/gaming, system, desktop (files/URL/notify/shell)
 
 ## Layout
@@ -35,13 +35,36 @@ The orchestrator **always runs on the PC**.
 | Phone | `python main.py --mode telegram` on the PC, then `/pair CODE` in Telegram |
 | Both | `python main.py --mode both` |
 
+### Security model (important)
+
+**Anyone who can find your bot username can message it — but that must not mean they control your PC.**
+
+| Layer | Behavior |
+|-------|----------|
+| Stranger DM | Reply `Unauthorized.` + notify owner; no pair instructions |
+| `/pair CODE` | 10-char secret from PC console; 5 fails → 15 min lockout |
+| After first pair | Pairing **locks**; code rotates |
+| Owner | `TELEGRAM_OWNER_CHAT_ID` (recommended) or first successful `/pair` |
+| Dangerous tools | ✅/❌ buttons go **only to the owner chat** (attacker cannot self-approve) |
+| `/audit` `/lock` `/unlock` `/revoke` | Owner only |
+
+Recommended `.env`:
+
+```env
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_OWNER_CHAT_ID=123456789   # from /whoami
+TELEGRAM_CHAT_ID=123456789
+SHELL_ENABLED=true
+```
+
+Keep the bot username private. Prefer BotFather settings that limit group adds. Do not share pair codes from logs.
+
 ### Pairing
 
-1. Start Telegram mode on the PC — console prints `Telegram pair code: ……`
-2. In Telegram, send `/pair AB12CD`
-3. Chat is stored in `data/allowed_chats.json`
-
-Optional: set `TELEGRAM_CHAT_ID` / `TELEGRAM_ALLOWED_CHAT_IDS` or a fixed `TELEGRAM_PAIR_CODE` in `.env`.
+1. Start Telegram mode — console prints a **secret** pair code
+2. From **your** phone: `/whoami` then `/pair CODE`
+3. Put `TELEGRAM_OWNER_CHAT_ID=<your id>` into `.env` and restart
+4. Pairing stays locked; use owner `/unlock` only to add another trusted chat
 
 ### Inbound from phone
 

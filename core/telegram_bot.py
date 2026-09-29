@@ -11,27 +11,27 @@ from core.audit import get_audit_logger
 from core.config import Settings
 from core.confirmation import TelegramGateway, use_confirmation_gateway
 from core.inbound import extract_media, save_telegram_media, transcribe_audio_file
-from core.pairing import PairingStore
+from core.pairing import PairResult, PairingStore
 from core.registry import ToolRegistry
 from core.telegram_api import TelegramAPIError, TelegramClient
 
 
 HELP_TEXT = """\
-Nexus Node — remote PC assistant
+Nexus Node — remote PC assistant (owner-locked)
 
-Send a text command, or drop a file / photo / voice note — it will be saved on the PC.
+Only paired chats can control this PC. Dangerous actions are confirmed
+ONLY in the owner Telegram chat (not by a stranger).
 
 Commands:
-/start       — welcome
-/help        — this help
-/pair CODE   — link this chat (code is printed on the PC console)
-/tools       — list available tools
-/reset       — clear conversation memory
-/status      — PC online / config check
-/inbox       — show inbound save folder
-/audit       — last dangerous/notable actions on the PC
+/start /help
+/pair CODE     — claim access (printed on the PC; locks after first owner)
+/lock          — (owner) refuse new /pair
+/unlock        — (owner) temporarily allow another /pair
+/revoke ID     — (owner) remove a paired chat
+/whoami        — show your chat id + role
+/tools /reset /status /inbox /audit
 
-Dangerous actions ask for ✅ Yes / ❌ No buttons here in Telegram.
+Keep the bot username private. Prefer TELEGRAM_OWNER_CHAT_ID in .env.
 """
 
 
@@ -57,12 +57,17 @@ class TelegramBot:
             data_dir=settings.data_dir,
             env_pair_code=settings.telegram_pair_code,
             seed_chat_ids=settings.allowed_telegram_chat_ids,
+            owner_chat_id=settings.owner_chat_id,
+            pairing_open=settings.telegram_pairing_open,
+            max_pair_attempts=settings.pair_max_attempts,
+            pair_lockout_seconds=settings.pair_lockout_seconds,
         )
         self.audit = get_audit_logger(settings.audit_log_path)
         self._agents: dict[str, Agent] = {}
         self._gateways: dict[str, TelegramGateway] = (
             shared_gateways if shared_gateways is not None else {}
         )
+        self._owner_gateway: TelegramGateway | None = None
         self._stop = threading.Event()
         self._offset: int | None = None
 
@@ -75,12 +80,19 @@ class TelegramBot:
         return thread
 
     def run_forever(self) -> None:
-        """Block and process updates until stop() or KeyboardInterrupt."""
         print("Telegram bot polling…")
-        print(f"Pair code: {self.pairing.pair_code}")
-        print(f"Paired chats: {sorted(self.pairing.allowed) or '(none yet — send /pair CODE)'}")
+        print(f"Pair code (keep secret): {self.pairing.pair_code}")
+        print(f"Owner chat: {self.pairing.owner_chat_id or '(none — first /pair becomes owner)'}")
+        print(f"Pairing open: {self.pairing.pairing_open}")
+        print(f"Paired chats: {sorted(self.pairing.allowed) or '(none)'}")
         print(f"Inbox: {self.settings.inbox_dir}")
-        print("Send a message to your bot from the phone or Telegram Desktop.\n")
+        if not self.pairing.owner_chat_id:
+            print(
+                "SECURITY: set TELEGRAM_OWNER_CHAT_ID in .env after /whoami, "
+                "or pair once from your phone and keep the code private.\n"
+            )
+        else:
+            print()
 
         while not self._stop.is_set():
             try:
@@ -107,7 +119,25 @@ class TelegramBot:
                 except Exception as exc:  # noqa: BLE001
                     print(f"Failed to handle update: {exc}")
 
+    def owner_gateway(self) -> TelegramGateway | None:
+        owner = self.pairing.owner_chat_id
+        if not owner:
+            return None
+        if self._owner_gateway is None or str(self._owner_gateway.chat_id) != str(owner):
+            key = str(owner)
+            gateway = self._gateways.get(key)
+            if gateway is None:
+                gateway = TelegramGateway(
+                    client=self.client,
+                    chat_id=owner,
+                    timeout_seconds=self.settings.confirmation_timeout_seconds,
+                )
+                self._gateways[key] = gateway
+            self._owner_gateway = gateway
+        return self._owner_gateway
+
     def gateway_for(self, chat_id: int | str) -> TelegramGateway:
+        """Legacy per-chat gateway (used only for non-owner bookkeeping)."""
         key = str(chat_id)
         gateway = self._gateways.get(key)
         if gateway is None:
@@ -130,20 +160,40 @@ class TelegramBot:
     def _chat_allowed(self, chat_id: int | str) -> bool:
         return self.pairing.is_allowed(chat_id)
 
+    def _notify_owner(self, text: str) -> None:
+        owner = self.pairing.owner_chat_id
+        if not owner:
+            return
+        try:
+            self.client.send_message(owner, text)
+        except TelegramAPIError:
+            pass
+
     def _agent_for(self, chat_id: int | str) -> Agent:
         key = str(chat_id)
         agent = self._agents.get(key)
         if agent is None:
-            gateway = self.gateway_for(chat_id)
             agent = Agent(
                 self.registry,
                 self.settings,
-                confirm_fn=lambda prompt, _tg: gateway.ask(prompt),
+                confirm_fn=self._confirm_as_owner,
                 audit=self.audit,
                 source=f"telegram:{chat_id}",
             )
             self._agents[key] = agent
         return agent
+
+    def _confirm_as_owner(self, prompt: str, _use_telegram: bool) -> bool:
+        """Dangerous actions are ALWAYS confirmed in the owner chat."""
+        gateway = self.owner_gateway()
+        if gateway is None:
+            self.audit.log(
+                "confirmation_blocked",
+                error="No owner chat configured — refusing dangerous action.",
+            )
+            return False
+        # Annotate who requested if available via prompt already; gateway waits on owner.
+        return gateway.ask(prompt)
 
     def _handle_callback(self, query: dict[str, Any]) -> None:
         data = query.get("data") or ""
@@ -152,6 +202,8 @@ class TelegramBot:
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
         message_id = message.get("message_id")
+        from_user = query.get("from") or {}
+        user_id = from_user.get("id")
 
         if callback_id:
             try:
@@ -159,7 +211,13 @@ class TelegramBot:
             except TelegramAPIError:
                 pass
 
-        if chat_id is None or not self._chat_allowed(chat_id):
+        # Only the owner chat may approve/deny.
+        if chat_id is None or not self.pairing.is_owner(chat_id):
+            self.audit.log(
+                "confirmation_rejected_non_owner",
+                chat_id=chat_id,
+                user_id=user_id,
+            )
             return
 
         parts = data.split(":")
@@ -167,8 +225,8 @@ class TelegramBot:
             return
         request_id, decision = parts[1], parts[2]
         allowed = decision == "yes"
-        gateway = self.gateway_for(chat_id)
-        found = gateway.resolve(request_id, allowed)
+        gateway = self.owner_gateway()
+        found = bool(gateway and gateway.resolve(request_id, allowed))
 
         if message_id is not None:
             try:
@@ -193,18 +251,68 @@ class TelegramBot:
         text = (message.get("text") or message.get("caption") or "").strip()
         media = extract_media(message)
 
-        # Pairing is allowed before allowlist membership.
         if text.lower().startswith("/pair"):
             self._handle_pair(chat_id, text)
             return
 
-        if not self._chat_allowed(chat_id):
+        if text.lower() in {"/whoami", "whoami"}:
+            role = "owner" if self.pairing.is_owner(chat_id) else (
+                "paired" if self._chat_allowed(chat_id) else "stranger"
+            )
             self.client.send_message(
                 chat_id,
-                "This chat is not paired.\n"
-                "On the PC console, find the pair code, then send:\n"
-                "/pair YOURCODE",
+                f"chat_id={chat_id}\nrole={role}\n"
+                f"Put TELEGRAM_OWNER_CHAT_ID={chat_id} in the PC .env for strongest lock.",
             )
+            return
+
+        if not self._chat_allowed(chat_id):
+            self.audit.log("unauthorized_message", chat_id=chat_id, text=text[:120])
+            self._notify_owner(f"⚠️ Unauthorized Telegram chat tried to talk: {chat_id}")
+            # Do not explain how to pair — reduces phishing/social-engineering surface.
+            self.client.send_message(chat_id, "Unauthorized.")
+            return
+
+        # Owner admin commands
+        lowered = text.lower()
+        if lowered in {"/lock", "lock"}:
+            if not self.pairing.is_owner(chat_id):
+                self.client.send_message(chat_id, "Owner only.")
+                return
+            self.pairing.set_pairing_open(False)
+            self.client.send_message(chat_id, "Pairing locked. New /pair requests will fail.")
+            return
+        if lowered in {"/unlock", "unlock"}:
+            if not self.pairing.is_owner(chat_id):
+                self.client.send_message(chat_id, "Owner only.")
+                return
+            self.pairing.set_pairing_open(True)
+            code = self.pairing.rotate_code()
+            print(f"Pairing unlocked. New pair code: {code}")
+            self.client.send_message(
+                chat_id,
+                "Pairing unlocked temporarily.\n"
+                f"New code (also on PC console): `{code}`\n"
+                "Send /lock when done.",
+            )
+            return
+        if lowered.startswith("/revoke"):
+            if not self.pairing.is_owner(chat_id):
+                self.client.send_message(chat_id, "Owner only.")
+                return
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2:
+                self.client.send_message(chat_id, "Usage: /revoke CHAT_ID")
+                return
+            target = parts[1].strip()
+            if self.pairing.revoke(target):
+                self.client.send_message(chat_id, f"Revoked {target}.")
+                self.audit.log("chat_revoked", by=chat_id, target=target)
+            else:
+                self.client.send_message(
+                    chat_id,
+                    "Could not revoke (missing, or refused to revoke owner).",
+                )
             return
 
         if media is not None:
@@ -214,11 +322,7 @@ class TelegramBot:
         if not text:
             return
 
-        lowered = text.lower()
-        if lowered in {"/start", "start"}:
-            self.client.send_message(chat_id, HELP_TEXT)
-            return
-        if lowered in {"/help", "help"}:
+        if lowered in {"/start", "start", "/help", "help"}:
             self.client.send_message(chat_id, HELP_TEXT)
             return
         if lowered in {"/tools", "tools"}:
@@ -240,6 +344,9 @@ class TelegramBot:
             )
             return
         if lowered.startswith("/audit"):
+            if not self.pairing.is_owner(chat_id):
+                self.client.send_message(chat_id, "Owner only.")
+                return
             self._send_audit(chat_id, text)
             return
 
@@ -252,21 +359,39 @@ class TelegramBot:
     def _handle_pair(self, chat_id: int | str, text: str) -> None:
         parts = text.split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
-            self.client.send_message(
-                chat_id,
-                "Usage: /pair CODE\nThe code is printed on the PC when the bot starts.",
-            )
+            self.client.send_message(chat_id, "Usage: /pair CODE")
             return
         code = parts[1].strip()
-        if self.pairing.try_pair(chat_id, code):
-            print(f"Paired Telegram chat: {chat_id}")
+        result = self.pairing.try_pair(chat_id, code)
+        self.audit.log("pair_attempt", chat_id=chat_id, result=result.value)
+
+        if result == PairResult.OK:
+            print(f"Paired Telegram chat: {chat_id} (owner={self.pairing.owner_chat_id})")
+            print(f"Pairing locked. Rotated code (PC only): {self.pairing.pair_code}")
             self.client.send_message(
                 chat_id,
-                f"Paired ✅ chat {chat_id}\nYou can now send commands, files, and voice notes.",
+                f"Paired ✅ as chat {chat_id}\n"
+                f"Owner: {self.pairing.owner_chat_id}\n"
+                "Pairing is now locked. Dangerous actions confirm in the owner chat only.",
             )
-            self.client.send_message(chat_id, HELP_TEXT)
-        else:
-            self.client.send_message(chat_id, "Invalid pair code. Check the PC console and retry.")
+            if self.pairing.is_owner(chat_id):
+                self.client.send_message(chat_id, HELP_TEXT)
+            self._notify_owner(f"ℹ️ Chat paired: {chat_id}")
+            return
+
+        # Generic failure to strangers; slightly clearer to already-known contexts.
+        if result == PairResult.ALREADY_PAIRED:
+            self.client.send_message(chat_id, "Already paired.")
+            return
+        if result == PairResult.RATE_LIMITED:
+            self.client.send_message(chat_id, "Too many attempts. Try later.")
+            self._notify_owner(f"⚠️ Pair rate-limit hit by chat {chat_id}")
+            return
+        if result in {PairResult.LOCKED, PairResult.WRONG_CHAT, PairResult.BAD_CODE}:
+            self.client.send_message(chat_id, "Pairing rejected.")
+            self._notify_owner(f"⚠️ Failed /pair from chat {chat_id} ({result.value})")
+            return
+        self.client.send_message(chat_id, "Pairing rejected.")
 
     def _send_status(self, chat_id: int | str) -> None:
         s = self.settings
@@ -279,11 +404,12 @@ class TelegramBot:
                     f"Model: {s.openai_model}",
                     f"Tools: {len(self.registry)}",
                     f"Chat: {chat_id}",
+                    f"Owner: {self.pairing.owner_chat_id}",
+                    f"You are owner: {self.pairing.is_owner(chat_id)}",
+                    f"Pairing open: {self.pairing.pairing_open}",
                     f"Paired chats: {len(self.pairing.allowed)}",
-                    f"Inbox: {s.inbox_dir}",
                     f"Shell: {'on' if s.safety.shell_enabled else 'OFF'}",
                     f"Inbound max: {s.safety.inbound_max_bytes} bytes",
-                    f"Audit: {s.audit_log_path}",
                 ]
             ),
         )
@@ -365,12 +491,10 @@ class TelegramBot:
 
         self.client.send_message(chat_id, "\n".join(lines))
 
-        # If the user attached a caption or we transcribed voice, run the agent.
         follow_up = caption.strip()
         if not follow_up and transcript:
             follow_up = transcript
         if follow_up:
-            # Tell the agent where the file landed so tools can use the path.
             prompt = (
                 f"{follow_up}\n\n"
                 f"[Attached file saved on PC at: {saved.get('path')} "
@@ -380,7 +504,7 @@ class TelegramBot:
 
     def _run_agent(self, chat_id: int | str, text: str) -> None:
         agent = self._agent_for(chat_id)
-        gateway = self.gateway_for(chat_id)
+        gateway = self.owner_gateway() or self.gateway_for(chat_id)
         self.client.send_message(chat_id, "⏳ Working…")
 
         with use_confirmation_gateway(gateway):
