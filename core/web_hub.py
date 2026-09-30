@@ -22,6 +22,7 @@ from core.agent import Agent
 from core.audit import get_audit_logger
 from core.chat_history import ChatHistory
 from core.config import Settings
+from core.contacts import ContactStore
 from core.context import request_context
 from core.devices import DeviceRegistry, ping_device
 from core.netinfo import hub_urls, print_hub_banner
@@ -83,6 +84,14 @@ class PushSubBody(BaseModel):
     keys: dict[str, str]
 
 
+class ContactBody(BaseModel):
+    name: str
+    email: str = ""
+    telegram: str = ""
+    notes: str = ""
+    id: str | None = None
+
+
 def _account_to_profile(acc: Account) -> UserProfile:
     return UserProfile(
         chat_id=acc.id,
@@ -129,6 +138,7 @@ def create_app(
     broker = WebConfirmBroker(timeout_seconds=settings.confirmation_timeout_seconds)
     push = PushStore(settings.data_dir / "push.json")
     chats = ChatHistory(settings.data_dir / "chats")
+    contacts = ContactStore(settings.data_dir / "contacts")
     agents: dict[str, Agent] = {}
     agents_guard = threading.Lock()
     agent_locks: dict[str, threading.Lock] = {}
@@ -383,6 +393,71 @@ def create_app(
             for t in agent._tools_for_role()
         ]
         return {"tools": [n for n in names if n]}
+
+    @app.get("/api/assistant")
+    def assistant_status(account: Account = Depends(require_account)) -> dict[str, Any]:
+        _ = account
+        brave = bool(
+            (os.getenv("BRAVE_API_KEY") or os.getenv("BRAVE_SEARCH_API_KEY") or "").strip()
+        )
+        tavily = bool((os.getenv("TAVILY_API_KEY") or "").strip())
+        smtp = bool(
+            (os.getenv("SMTP_HOST") or "").strip()
+            and (os.getenv("SMTP_FROM") or os.getenv("SMTP_USER") or "").strip()
+        )
+        return {
+            "web_search": {
+                "ready": True,
+                "providers": {
+                    "brave": brave,
+                    "tavily": tavily,
+                    "duckduckgo_fallback": True,
+                    "wikipedia_fallback": True,
+                },
+                "preferred": "brave" if brave else ("tavily" if tavily else "duckduckgo"),
+            },
+            "fetch_url": {"ready": True},
+            "email": {
+                "ready": smtp,
+                "from": (os.getenv("SMTP_FROM") or os.getenv("SMTP_USER") or None)
+                if smtp
+                else None,
+            },
+            "telegram_messaging": {
+                "ready": bool((os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()),
+            },
+            "contacts": {"ready": True},
+        }
+
+    @app.get("/api/contacts")
+    def list_contacts_api(account: Account = Depends(require_account)) -> dict[str, Any]:
+        return {"contacts": contacts.list(account.id)}
+
+    @app.post("/api/contacts")
+    def upsert_contact_api(
+        body: ContactBody, account: Account = Depends(require_account)
+    ) -> dict[str, Any]:
+        try:
+            contact = contacts.upsert(
+                account.id,
+                name=body.name,
+                email=body.email,
+                telegram=body.telegram,
+                notes=body.notes,
+                contact_id=body.id,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"contact": contact}
+
+    @app.delete("/api/contacts/{contact_id}")
+    def delete_contact_api(
+        contact_id: str, account: Account = Depends(require_account)
+    ) -> dict[str, Any]:
+        ok = contacts.remove(account.id, contact_id)
+        if not ok:
+            raise HTTPException(404, "Contact not found")
+        return {"ok": True}
 
     @app.get("/api/chat")
     def get_chat(account: Account = Depends(require_account)) -> dict[str, Any]:

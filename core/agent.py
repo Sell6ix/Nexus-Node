@@ -28,9 +28,17 @@ from core.users import UserProfile, redact_secrets
 
 SYSTEM_PROMPT = """\
 You are Nexus Node, a personal assistant for daily tasks on the user's devices.
-Users may talk from CLI or Telegram. Each person can use their own AI API key.
-Help by calling the provided tools. Be concise and honest about failures.
-Never invent tool results. Prefer short replies that read well on a phone.
+Users talk from the web app (phone/PC); legacy Telegram CLI also exists.
+Each person can use their own AI API key.
+
+Capabilities:
+- Local: notes, todos, reminders, files, desktop notify, open URL, shell (confirmed).
+- Internet: web_search for facts, then fetch_url to read promising pages. Do not invent live data.
+- Messaging: list/add contacts; send_email or send_telegram_message only to known contacts \
+(or explicit addresses). Outbound messages always require the user to Allow in the app.
+
+Be concise and honest about failures. Never invent tool results.
+Prefer short replies that read well on a phone.
 If a tool is unavailable for this user's role or device, say so briefly.
 """
 
@@ -46,6 +54,25 @@ AUDITED_TOOLS = frozenset(
         "open_url",
         "notify_desktop",
         "launch_steam_game",
+        "web_search",
+        "fetch_url",
+        "send_email",
+        "send_telegram_message",
+        "add_contact",
+        "remove_contact",
+    }
+)
+
+# Always execute on the hub (SMTP/search keys live here), even if a remote PC is active.
+HUB_LOCAL_TOOLS = frozenset(
+    {
+        "web_search",
+        "fetch_url",
+        "list_contacts",
+        "add_contact",
+        "remove_contact",
+        "send_email",
+        "send_telegram_message",
     }
 )
 
@@ -291,7 +318,11 @@ class Agent:
 
         func = registered.func
         device = self._resolve_device()
-        remote = device is not None and not device.is_local
+        remote = (
+            device is not None
+            and not device.is_local
+            and name not in HUB_LOCAL_TOOLS
+        )
 
         if requires_confirm:
             prompt = confirmation_message_for(func, validated, tool_name=name)

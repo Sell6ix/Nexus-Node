@@ -27,8 +27,10 @@ from smoke_secrets import (  # noqa: E402, F401
     test_user_store_encrypt,
 )
 from core.chat_history import ChatHistory
+from core.contacts import ContactStore
 from core.tls import ensure_dev_cert
 from tools.desktop_tools import _windows_toast_script, _xml_escape
+from tools.web_tools import _html_to_text
 
 
 def test_windows_toast_escapes_xml() -> None:
@@ -66,3 +68,20 @@ def test_chat_history_persist(tmp_path: Path) -> None:
     ]
     store.clear("u1")
     assert store.load("u1") == []
+
+
+def test_contacts_store(tmp_path: Path) -> None:
+    store = ContactStore(tmp_path / "contacts")
+    c = store.upsert("u1", name="Masha", email="masha@example.com", telegram="@masha")
+    assert c["id"]
+    assert store.find("u1", "masha")["email"] == "masha@example.com"
+    assert store.find("u1", "masha@example.com") is not None
+    assert store.remove("u1", c["id"])
+    assert store.list("u1") == []
+
+
+def test_html_to_text_strips_tags() -> None:
+    text = _html_to_text("<html><head><title>Hi</title><script>x</script></head><body><p>Hello <b>world</b></p></body></html>")
+    assert "Hello" in text and "world" in text
+    assert "<" not in text
+    assert "script" not in text.lower() or "x" not in text

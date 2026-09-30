@@ -635,9 +635,31 @@ function SettingsPanel({
   const [invite, setInvite] = useState<string | null>(null)
   const [tools, setTools] = useState<string[]>([])
   const [pushNote, setPushNote] = useState('')
+  const [assistantNote, setAssistantNote] = useState('')
+  const [contacts, setContacts] = useState<
+    { id: string; name: string; email?: string | null; telegram?: string | null }[]
+  >([])
+  const [contactForm, setContactForm] = useState({ name: '', email: '', telegram: '' })
+
+  async function reloadContacts() {
+    const res = await api.contacts()
+    setContacts(res.contacts || [])
+  }
 
   useEffect(() => {
     void api.tools().then((t) => setTools(t.tools)).catch(() => undefined)
+    void api
+      .assistant()
+      .then((a) => {
+        const bits = [
+          `Search: ${a.web_search.preferred}`,
+          a.email.ready ? `Email: ${a.email.from}` : 'Email: not configured',
+          a.telegram_messaging.ready ? 'Telegram bot: ready' : 'Telegram bot: not set',
+        ]
+        setAssistantNote(bits.join(' · '))
+      })
+      .catch(() => undefined)
+    void reloadContacts().catch(() => undefined)
   }, [])
 
   const toolPreview = useMemo(() => tools.slice(0, 12).join(', ') + (tools.length > 12 ? '…' : ''), [tools])
@@ -702,6 +724,88 @@ function SettingsPanel({
             }}
           >
             Clear key
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-2">
+        <div className="font-medium">Assistant capabilities</div>
+        <p className="text-xs text-[var(--muted)] leading-relaxed">
+          Ask in chat to search the web, read a page, or message a contact.
+          Outbound email/Telegram always asks Allow first.
+        </p>
+        <p className="text-xs text-[var(--text)]">{assistantNote || 'Loading…'}</p>
+        <p className="text-xs text-[var(--muted)]">
+          Hub .env: optional <code className="text-[var(--accent)]">BRAVE_API_KEY</code> /{' '}
+          <code className="text-[var(--accent)]">TAVILY_API_KEY</code>,{' '}
+          <code className="text-[var(--accent)]">SMTP_*</code>,{' '}
+          <code className="text-[var(--accent)]">TELEGRAM_BOT_TOKEN</code>.
+        </p>
+      </div>
+
+      <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">
+        <div className="font-medium">Contacts</div>
+        <p className="text-xs text-[var(--muted)]">
+          Save people the assistant can email or Telegram (after your confirmation).
+        </p>
+        <ul className="space-y-2">
+          {contacts.length === 0 && (
+            <li className="text-xs text-[var(--muted)]">No contacts yet.</li>
+          )}
+          {contacts.map((c) => (
+            <li
+              key={c.id}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--line)] bg-[var(--ink)]/40 px-3 py-2"
+            >
+              <div>
+                <div className="text-sm font-medium">{c.name}</div>
+                <div className="text-xs text-[var(--muted)]">
+                  {[c.email, c.telegram ? `@${String(c.telegram).replace(/^@/, '')}` : null]
+                    .filter(Boolean)
+                    .join(' · ') || 'no channel'}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="text-xs text-[var(--muted)] hover:text-[var(--danger)]"
+                onClick={() => {
+                  void api
+                    .deleteContact(c.id)
+                    .then(() => reloadContacts())
+                    .then(() => onToast('Contact removed'))
+                    .catch((e) => onToast(e.message))
+                }}
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+        <div className="space-y-2 pt-1">
+          {(['name', 'email', 'telegram'] as const).map((k) => (
+            <input
+              key={k}
+              value={contactForm[k]}
+              onChange={(e) => setContactForm({ ...contactForm, [k]: e.target.value })}
+              placeholder={k === 'telegram' ? 'telegram chat id or @user' : k}
+              className="w-full rounded-xl bg-[var(--ink)]/60 border border-[var(--line)] px-3 py-2 text-sm"
+            />
+          ))}
+          <button
+            type="button"
+            className="rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] font-semibold px-4 py-2"
+            onClick={() => {
+              void api
+                .upsertContact(contactForm)
+                .then(() => {
+                  setContactForm({ name: '', email: '', telegram: '' })
+                  return reloadContacts()
+                })
+                .then(() => onToast('Contact saved'))
+                .catch((e) => onToast(e.message))
+            }}
+          >
+            Save contact
           </button>
         </div>
       </div>

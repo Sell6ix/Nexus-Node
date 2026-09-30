@@ -70,6 +70,37 @@ export const api = {
   invite: (label = '') =>
     request<{ code: string; expires_at: number }>('/api/invites', { method: 'POST', body: JSON.stringify({ label }) }),
   tools: () => request<{ tools: string[] }>('/api/tools'),
+  assistant: () =>
+    request<{
+      web_search: { ready: boolean; preferred: string; providers: Record<string, boolean> }
+      fetch_url: { ready: boolean }
+      email: { ready: boolean; from: string | null }
+      telegram_messaging: { ready: boolean }
+      contacts: { ready: boolean }
+    }>('/api/assistant'),
+  contacts: () =>
+    request<{
+      contacts: {
+        id: string
+        name: string
+        email?: string | null
+        telegram?: string | null
+        notes?: string | null
+      }[]
+    }>('/api/contacts'),
+  upsertContact: (body: {
+    name: string
+    email?: string
+    telegram?: string
+    notes?: string
+    id?: string
+  }) =>
+    request<{ contact: { id: string; name: string } }>('/api/contacts', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  deleteContact: (id: string) =>
+    request<{ ok: boolean }>(`/api/contacts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   pushVapid: () => request<{ publicKey: string }>('/api/push/vapid'),
   pushSubscribe: (body: { endpoint: string; keys: { p256dh: string; auth: string } }) =>
     request<{ ok: boolean }>('/api/push/subscribe', { method: 'POST', body: JSON.stringify(body) }),

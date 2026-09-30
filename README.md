@@ -20,6 +20,7 @@ Phone or PC browser (PWA)
 - **Worker** (`--mode worker`) — extra PC that exposes tools to the hub  
 - First registered user is **owner**; others join with an **invite code** (or open signup)
 - Chat history is saved per account on the hub (`data/chats/`) and restores after reload
+- Web search + page fetch; contacts with confirmed email / Telegram send
 
 ## Quick start
 

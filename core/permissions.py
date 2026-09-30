@@ -34,6 +34,10 @@ DEFAULT_FRIEND_ALLOW_TOOLS: frozenset[str] = frozenset(
         "complete_todo",
         "set_reminder",
         "list_reminders",
+        "web_search",
+        "fetch_url",
+        "list_contacts",
+        "add_contact",
     }
 )
 
@@ -45,6 +49,9 @@ DEFAULT_FRIEND_DENY_TOOLS: frozenset[str] = frozenset(
         "create_project_structure",
         "update_game_via_steamcmd",
         "send_telegram_backup",
+        "send_email",
+        "send_telegram_message",
+        "remove_contact",
     }
 )
 
