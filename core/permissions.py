@@ -49,6 +49,7 @@ DEFAULT_FRIEND_ALLOW_TOOLS: frozenset[str] = frozenset(
         "add_calendar_event",
         "list_calendar_events",
         "cancel_calendar_event",
+        "sync_calendars",
         "get_daily_briefing",
         "schedule_daily_briefing",
         "get_briefing_schedule",

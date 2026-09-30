@@ -60,6 +60,9 @@ export default function App() {
   const [setupDismissed, setSetupDismissed] = useState(
     () => localStorage.getItem('nexus_setup_dismissed') === '1',
   )
+  const [installPrompt, setInstallPrompt] = useState<{
+    prompt: () => Promise<void>
+  } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const listenRef = useRef<ListenHandle | null>(null)
@@ -163,10 +166,34 @@ export default function App() {
         window.speechSynthesis.getVoices()
       }
     }
+    const onBip = (e: Event) => {
+      e.preventDefault()
+      const ev = e as Event & { prompt: () => Promise<void> }
+      setInstallPrompt({ prompt: () => ev.prompt() })
+    }
+    window.addEventListener('beforeinstallprompt', onBip)
+    const clearBadge = () => {
+      const nav = navigator as Navigator & {
+        clearAppBadge?: () => Promise<void>
+      }
+      void nav.clearAppBadge?.()
+      void navigator.serviceWorker?.ready.then((reg) => {
+        reg.active?.postMessage({ type: 'clear_badge' })
+      })
+    }
+    clearBadge()
+    window.addEventListener('focus', clearBadge)
+    const onSwMsg = (ev: MessageEvent) => {
+      if (ev.data?.type === 'clear_badge') clearBadge()
+    }
+    navigator.serviceWorker?.addEventListener('message', onSwMsg)
     return () => {
       listenRef.current?.stop()
       stopSpeaking()
       stopActiveRecording()
+      window.removeEventListener('beforeinstallprompt', onBip)
+      window.removeEventListener('focus', clearBadge)
+      navigator.serviceWorker?.removeEventListener('message', onSwMsg)
     }
   }, [boot])
 
@@ -201,6 +228,17 @@ export default function App() {
       void toggleMic()
       return
     }
+    const shareTitle = q.get('title') || ''
+    const shareText = q.get('text') || ''
+    const shareUrl = q.get('url') || ''
+    if (shareTitle || shareText || shareUrl) {
+      deepLinkDone.current = true
+      const bits = [shareTitle, shareText, shareUrl].filter(Boolean)
+      setInput(bits.join('\n'))
+      setTab('chat')
+      history.replaceState({}, '', location.pathname)
+      return
+    }
     if (tabQ) {
       deepLinkDone.current = true
       history.replaceState({}, '', location.pathname)
@@ -225,11 +263,17 @@ export default function App() {
           }
           if (data.type === 'reminder' || data.type === 'briefing') {
             setToast(data.text || (data.type === 'briefing' ? 'Briefing' : 'Reminder'))
+            const nav = navigator as Navigator & {
+              setAppBadge?: (n?: number) => Promise<void>
+            }
+            void nav.setAppBadge?.(1)
             if (conversationIdRef.current === 'main') {
               setMessages((m) => [...m, { role: 'system', text: data.text }])
             }
             showLocalNotification(
-              data.type === 'briefing' ? 'Daily briefing' : 'Nexus Node',
+              data.type === 'briefing'
+                ? data.title || 'Briefing'
+                : 'Nexus Node',
               data.text,
             )
             const prefs = loadVoicePrefs()
@@ -498,13 +542,29 @@ export default function App() {
             {health?.device ? ` · hub ${health.device}` : ''}
           </div>
         </div>
-        <button
-          type="button"
-          onClick={logout}
-          className="text-sm text-[var(--muted)] hover:text-[var(--text)] px-2 py-1"
-        >
-          Sign out
-        </button>
+        <div className="flex items-center gap-1">
+          {installPrompt && (
+            <button
+              type="button"
+              onClick={() => {
+                void installPrompt
+                  .prompt()
+                  .then(() => setInstallPrompt(null))
+                  .catch(() => undefined)
+              }}
+              className="text-sm font-semibold text-[var(--accent)] px-2 py-1"
+            >
+              Install
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={logout}
+            className="text-sm text-[var(--muted)] hover:text-[var(--text)] px-2 py-1"
+          >
+            Sign out
+          </button>
+        </div>
       </header>
 
       <nav className="flex gap-1 p-1 rounded-2xl bg-[var(--panel)] border border-[var(--line)] mb-3">
@@ -1143,6 +1203,9 @@ function SettingsPanel({
   const [briefMinute, setBriefMinute] = useState(0)
   const [briefTz, setBriefTz] = useState('Asia/Jerusalem')
   const [briefLocation, setBriefLocation] = useState('Tel Aviv')
+  const [eveEnabled, setEveEnabled] = useState(false)
+  const [eveHour, setEveHour] = useState(20)
+  const [eveMinute, setEveMinute] = useState(0)
 
   async function reloadContacts() {
     const res = await api.contacts()
@@ -1183,6 +1246,9 @@ function SettingsPanel({
         setBriefMinute(Number(r.schedule?.minute ?? 0))
         setBriefTz(r.schedule?.timezone || 'Asia/Jerusalem')
         setBriefLocation(r.schedule?.location || 'Tel Aviv')
+        setEveEnabled(Boolean(r.schedule?.evening_enabled))
+        setEveHour(Number(r.schedule?.evening_hour ?? 20))
+        setEveMinute(Number(r.schedule?.evening_minute ?? 0))
       })
       .catch(() => undefined)
     void reloadContacts().catch(() => undefined)
@@ -1278,10 +1344,10 @@ function SettingsPanel({
       </div>
 
       <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">
-        <div className="font-medium">Morning briefing (auto)</div>
+        <div className="font-medium">Briefing (auto)</div>
         <p className="text-xs text-[var(--muted)]">
-          Daily summary at a local time (your timezone). Weather uses the city below
-          (Open-Meteo). Enable phone notifications so it can wake the device.
+          Morning and optional evening push in your timezone. Weather uses the city
+          below (Open-Meteo). Enable notifications so the phone can wake.
         </p>
         <label className="text-sm flex items-center gap-2">
           <input
@@ -1289,7 +1355,7 @@ function SettingsPanel({
             checked={briefEnabled}
             onChange={(e) => setBriefEnabled(e.target.checked)}
           />
-          Enabled
+          Morning enabled
         </label>
         <div className="flex flex-wrap gap-2 items-center">
           <label className="text-xs text-[var(--muted)]">
@@ -1311,6 +1377,38 @@ function SettingsPanel({
               max={59}
               value={briefMinute}
               onChange={(e) => setBriefMinute(Number(e.target.value))}
+              className="ml-2 w-16 rounded-lg bg-[var(--ink)]/60 border border-[var(--line)] px-2 py-1"
+            />
+          </label>
+        </div>
+        <label className="text-sm flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={eveEnabled}
+            onChange={(e) => setEveEnabled(e.target.checked)}
+          />
+          Evening enabled
+        </label>
+        <div className="flex flex-wrap gap-2 items-center">
+          <label className="text-xs text-[var(--muted)]">
+            Hour
+            <input
+              type="number"
+              min={0}
+              max={23}
+              value={eveHour}
+              onChange={(e) => setEveHour(Number(e.target.value))}
+              className="ml-2 w-16 rounded-lg bg-[var(--ink)]/60 border border-[var(--line)] px-2 py-1"
+            />
+          </label>
+          <label className="text-xs text-[var(--muted)]">
+            Minute
+            <input
+              type="number"
+              min={0}
+              max={59}
+              value={eveMinute}
+              onChange={(e) => setEveMinute(Number(e.target.value))}
               className="ml-2 w-16 rounded-lg bg-[var(--ink)]/60 border border-[var(--line)] px-2 py-1"
             />
           </label>
@@ -1338,6 +1436,9 @@ function SettingsPanel({
                 minute: briefMinute,
                 timezone: briefTz || 'Asia/Jerusalem',
                 location: briefLocation || 'Tel Aviv',
+                evening_enabled: eveEnabled,
+                evening_hour: eveHour,
+                evening_minute: eveMinute,
               })
               .then(() => onToast('Briefing schedule saved'))
               .catch((e) => onToast(e.message))
@@ -1350,6 +1451,9 @@ function SettingsPanel({
       <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">
         <div className="font-medium">Google (Gmail + Calendar)</div>
         <p className="text-xs text-[var(--muted)]">{googleNote}</p>
+        <p className="text-xs text-[var(--muted)]">
+          Sync: in chat say «синхронизируй календарь» (pull Google → hub, push asks Allow).
+        </p>
         <div className="flex flex-wrap gap-2">
           <button
             type="button"

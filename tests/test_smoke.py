@@ -106,11 +106,21 @@ def test_briefing_schedule(tmp_path: Path) -> None:
         minute=0,
         timezone_name="Asia/Jerusalem",
         location="Tel Aviv",
+        evening_enabled=True,
+        evening_hour=20,
+        evening_minute=0,
     )
     early = datetime(2026, 1, 15, 5, 59, tzinfo=timezone.utc)
-    assert "u2" not in store.due_users(now=early)
+    assert ("u2", "morning") not in store.due_slots(now=early)
     local_due = datetime(2026, 1, 15, 6, 1, tzinfo=timezone.utc)
-    assert "u2" in store.due_users(now=local_due)
+    assert ("u2", "morning") in store.due_slots(now=local_due)
+    eve_due = datetime(2026, 1, 15, 18, 1, tzinfo=timezone.utc)  # 20:01 Israel
+    slots = [s for s in store.due_slots(now=eve_due) if s[0] == "u2"]
+    assert ("u2", "morning") in slots
+    assert ("u2", "evening") in slots
+    store.mark_sent("u2", "2026-01-15", slot="morning")
+    store.mark_sent("u2", "2026-01-15", slot="evening")
+    assert [s for s in store.due_slots(now=eve_due) if s[0] == "u2"] == []
     assert store.get("u2")["location"] == "Tel Aviv"
     assert store.get("missing")["timezone"] == "Asia/Jerusalem"
 
@@ -129,8 +139,10 @@ def test_briefing_schedule(tmp_path: Path) -> None:
                 "today_low_c": 18,
                 "precip_chance_pct": 10,
             },
-        }
+        },
+        slot="evening",
     )
+    assert "Evening briefing" in text
     assert "Buy milk" in text
     assert "Tel Aviv" in text
     assert "partly cloudy" in text

@@ -1,4 +1,4 @@
-"""Shared daily briefing builder + per-user schedule (local timezone)."""
+"""Shared daily briefing builder + per-user morning/evening schedule."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from core.context import request_context
@@ -16,6 +16,8 @@ from core.secrets import default_box
 from core.weather import weather_for_city
 import tools.calendar_tools as cal
 import tools.daily_tools as daily
+
+Slot = Literal["morning", "evening"]
 
 
 def _tz(name: str | None) -> ZoneInfo:
@@ -79,9 +81,10 @@ def build_briefing(user_id: str, *, location: str | None = None) -> dict[str, An
         return sections
 
 
-def format_briefing_text(sections: dict[str, Any]) -> str:
+def format_briefing_text(sections: dict[str, Any], *, slot: Slot = "morning") -> str:
     """Short plain-text briefing for push / chat."""
-    lines = ["Daily briefing"]
+    title = "Evening briefing" if slot == "evening" else "Morning briefing"
+    lines = [title]
     wx = sections.get("weather") or {}
     if wx.get("ok"):
         place = (wx.get("place") or {}).get("name") or "there"
@@ -99,7 +102,8 @@ def format_briefing_text(sections: dict[str, Any]) -> str:
 
     todos = sections.get("todos") or {}
     if todos.get("count"):
-        lines.append(f"Todos ({todos['count']}):")
+        label = "Still open" if slot == "evening" else f"Todos ({todos['count']})"
+        lines.append(f"{label}:")
         for t in (todos.get("items") or [])[:5]:
             lines.append(f"• {t.get('title') or t}")
     else:
@@ -109,11 +113,11 @@ def format_briefing_text(sections: dict[str, Any]) -> str:
     gcal = ((sections.get("google") or {}).get("calendar") or {}).get("events") or []
     all_ev = list(events) + list(gcal)
     if all_ev:
-        lines.append("Calendar:")
+        lines.append("Calendar:" if slot == "morning" else "Coming up:")
         for ev in all_ev[:6]:
-            title = ev.get("title") or ev.get("summary") or "event"
+            title_ev = ev.get("title") or ev.get("summary") or "event"
             when = ev.get("start_at") or ev.get("start") or ""
-            lines.append(f"• {title} ({when})")
+            lines.append(f"• {title_ev} ({when})")
     else:
         lines.append("Calendar: clear")
 
@@ -128,11 +132,13 @@ def format_briefing_text(sections: dict[str, Any]) -> str:
     rems = sections.get("reminders") or {}
     if rems.get("count"):
         lines.append(f"Reminders open: {rems['count']}")
+    if slot == "evening":
+        lines.append("Wind down — pick one thing for tomorrow if you want.")
     return "\n".join(lines)
 
 
 class BriefingScheduleStore:
-    """``data/briefing/<user>.json`` — local hour:minute + IANA timezone."""
+    """``data/briefing/<user>.json`` — morning + optional evening, IANA tz."""
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
@@ -144,47 +150,55 @@ class BriefingScheduleStore:
 
     def get(self, user_id: str) -> dict[str, Any]:
         path = self._path(user_id)
+        defaults = {
+            "enabled": False,
+            "hour": 8,
+            "minute": 0,
+            "timezone": "Asia/Jerusalem",
+            "location": "Tel Aviv",
+            "last_sent_day": None,
+            "evening_enabled": False,
+            "evening_hour": 20,
+            "evening_minute": 0,
+            "evening_last_sent_day": None,
+        }
         if not path.is_file():
-            return {
-                "enabled": False,
-                "hour": 8,
-                "minute": 0,
-                "timezone": "Asia/Jerusalem",
-                "location": "Tel Aviv",
-                "last_sent_day": None,
-            }
+            return dict(defaults)
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return {
-                "enabled": False,
-                "hour": 8,
-                "minute": 0,
-                "timezone": "Asia/Jerusalem",
-                "location": "Tel Aviv",
-                "last_sent_day": None,
-            }
+            return dict(defaults)
         tz_name = str(raw.get("timezone") or "Asia/Jerusalem").strip() or "Asia/Jerusalem"
-        # Validate timezone early
         _ = _tz(tz_name)
         return {
             "enabled": bool(raw.get("enabled")),
             "hour": int(raw.get("hour") if raw.get("hour") is not None else 8),
             "minute": int(raw.get("minute") if raw.get("minute") is not None else 0),
             "timezone": tz_name,
-            "location": str(raw.get("location") or "").strip(),
+            "location": str(raw.get("location") or "Tel Aviv").strip() or "Tel Aviv",
             "last_sent_day": raw.get("last_sent_day"),
+            "evening_enabled": bool(raw.get("evening_enabled")),
+            "evening_hour": int(
+                raw.get("evening_hour") if raw.get("evening_hour") is not None else 20
+            ),
+            "evening_minute": int(
+                raw.get("evening_minute") if raw.get("evening_minute") is not None else 0
+            ),
+            "evening_last_sent_day": raw.get("evening_last_sent_day"),
         }
 
     def set(
         self,
         user_id: str,
         *,
-        enabled: bool,
-        hour: int = 8,
-        minute: int = 0,
+        enabled: bool | None = None,
+        hour: int | None = None,
+        minute: int | None = None,
         timezone_name: str | None = None,
         location: str | None = None,
+        evening_enabled: bool | None = None,
+        evening_hour: int | None = None,
+        evening_minute: int | None = None,
     ) -> dict[str, Any]:
         cur = self.get(user_id)
         tz_name = (
@@ -195,46 +209,64 @@ class BriefingScheduleStore:
             ZoneInfo(tz_name)
         except ZoneInfoNotFoundError as exc:
             raise ValueError(f"Unknown timezone '{tz_name}'") from exc
-        loc = cur.get("location") or ""
+        loc = cur.get("location") or "Tel Aviv"
         if location is not None:
-            loc = str(location).strip()
-        cur.update(
-            {
-                "enabled": bool(enabled),
-                "hour": max(0, min(23, int(hour))),
-                "minute": max(0, min(59, int(minute))),
-                "timezone": tz_name,
-                "location": loc,
-            }
-        )
+            loc = str(location).strip() or "Tel Aviv"
+        if enabled is not None:
+            cur["enabled"] = bool(enabled)
+        if hour is not None:
+            cur["hour"] = max(0, min(23, int(hour)))
+        if minute is not None:
+            cur["minute"] = max(0, min(59, int(minute)))
+        if evening_enabled is not None:
+            cur["evening_enabled"] = bool(evening_enabled)
+        if evening_hour is not None:
+            cur["evening_hour"] = max(0, min(23, int(evening_hour)))
+        if evening_minute is not None:
+            cur["evening_minute"] = max(0, min(59, int(evening_minute)))
+        cur["timezone"] = tz_name
+        cur["location"] = loc
         self._path(user_id).write_text(json.dumps(cur, indent=2) + "\n", encoding="utf-8")
         return cur
 
-    def mark_sent(self, user_id: str, day: str) -> None:
+    def mark_sent(self, user_id: str, day: str, *, slot: Slot = "morning") -> None:
         cur = self.get(user_id)
-        cur["last_sent_day"] = day
+        if slot == "evening":
+            cur["evening_last_sent_day"] = day
+        else:
+            cur["last_sent_day"] = day
         self._path(user_id).write_text(json.dumps(cur, indent=2) + "\n", encoding="utf-8")
 
-    def due_users(self, *, now: datetime | None = None) -> list[str]:
+    def due_slots(self, *, now: datetime | None = None) -> list[tuple[str, Slot]]:
+        """Return ``(user_id, slot)`` pairs that are due now."""
         base_utc = now or datetime.now(timezone.utc)
         if base_utc.tzinfo is None:
             base_utc = base_utc.replace(tzinfo=timezone.utc)
-        out: list[str] = []
+        out: list[tuple[str, Slot]] = []
         for path in self.root.glob("*.json"):
             uid = path.stem
             cfg = self.get(uid)
-            if not cfg.get("enabled"):
-                continue
             local = base_utc.astimezone(_tz(str(cfg.get("timezone") or "Asia/Jerusalem")))
             day = local.date().isoformat()
-            if cfg.get("last_sent_day") == day:
-                continue
-            if (local.hour, local.minute) >= (int(cfg["hour"]), int(cfg["minute"])):
-                out.append(uid)
+            hm = (local.hour, local.minute)
+            if cfg.get("enabled") and cfg.get("last_sent_day") != day:
+                if hm >= (int(cfg["hour"]), int(cfg["minute"])):
+                    out.append((uid, "morning"))
+            if cfg.get("evening_enabled") and cfg.get("evening_last_sent_day") != day:
+                if hm >= (int(cfg["evening_hour"]), int(cfg["evening_minute"])):
+                    out.append((uid, "evening"))
         return out
 
+    def due_users(self, *, now: datetime | None = None) -> list[str]:
+        """Backward-compat: users with any due morning slot."""
+        seen: list[str] = []
+        for uid, slot in self.due_slots(now=now):
+            if slot == "morning" and uid not in seen:
+                seen.append(uid)
+        return seen
 
-SendFn = Callable[[str, str], bool | None]
+
+SendFn = Callable[[str, str, str], bool | None]
 
 
 class BriefingNotifier:
@@ -266,7 +298,7 @@ class BriefingNotifier:
     def tick_once(self) -> int:
         sent = 0
         base_utc = datetime.now(timezone.utc)
-        for uid in self.store.due_users(now=base_utc):
+        for uid, slot in self.store.due_slots(now=base_utc):
             try:
                 cfg = self.store.get(uid)
                 local = base_utc.astimezone(
@@ -275,14 +307,15 @@ class BriefingNotifier:
                 day = local.date().isoformat()
                 loc = str(cfg.get("location") or "").strip() or "Tel Aviv"
                 sections = build_briefing(uid, location=loc)
-                text = format_briefing_text(sections)
-                ok = self.send(uid, text)
+                text = format_briefing_text(sections, slot=slot)
+                title = "Evening briefing" if slot == "evening" else "Morning briefing"
+                ok = self.send(uid, text, title)
                 if ok is False:
                     continue
-                self.store.mark_sent(uid, day)
+                self.store.mark_sent(uid, day, slot=slot)
                 sent += 1
             except Exception as exc:  # noqa: BLE001
-                print(f"[briefing] failed for {uid}: {exc}")
+                print(f"[briefing] failed for {uid}/{slot}: {exc}")
         return sent
 
     def _loop(self) -> None:

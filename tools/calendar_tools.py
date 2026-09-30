@@ -151,3 +151,146 @@ def cancel_calendar_event(event_id: str) -> dict[str, Any]:
         return {"ok": False, "error": f"Event not found: {event_id}"}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
+
+
+@tool
+def sync_calendars(direction: str = "both", days: int = 14) -> dict[str, Any]:
+    """Sync the hub local calendar with Google Calendar.
+
+    ``pull`` copies Google → local (deduped by google event id).
+    ``push`` creates Google events for local rows that are not yet linked
+    (asks Allow first). ``both`` does pull then push.
+
+    Args:
+        direction: ``pull``, ``push``, or ``both`` (default).
+        days: Look-ahead window for Google pull (1–60).
+
+    Returns:
+        Counts of pulled / pushed / skipped events.
+    """
+    from core.confirmation import confirm_action
+    from core.google_oauth import (
+        GoogleClient,
+        GoogleOAuthError,
+        GoogleTokenStore,
+        google_configured,
+    )
+    from core.secrets import default_box
+
+    direction_norm = (direction or "both").strip().lower()
+    if direction_norm not in {"pull", "push", "both"}:
+        return {"ok": False, "error": "direction must be pull, push, or both"}
+    if not google_configured():
+        return {"ok": False, "error": "Google not configured on hub (.env GOOGLE_CLIENT_*)."}
+
+    root = Path(__file__).resolve().parent.parent / "data"
+    store = GoogleTokenStore(root / "google", default_box(root))
+    uid = get_user_id()
+    st = store.status(uid)
+    if not st.get("connected"):
+        return {"ok": False, "error": "Connect Google in Settings first."}
+
+    try:
+        client = GoogleClient(store, uid)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+    pulled = 0
+    pushed = 0
+    skipped = 0
+    errors: list[str] = []
+
+    if direction_norm in {"pull", "both"}:
+        try:
+            remote = client.list_events(days=max(1, min(int(days or 14), 60)))
+        except GoogleOAuthError as exc:
+            return {"ok": False, "error": str(exc)}
+        rows = _load()
+        known = {
+            str(ev.get("google_event_id"))
+            for ev in rows
+            if ev.get("google_event_id")
+        }
+        for gev in remote:
+            gid = str(gev.get("id") or "")
+            if not gid or gid in known:
+                skipped += 1
+                continue
+            start = str(gev.get("start") or "")
+            end = str(gev.get("end") or "")
+            if not start:
+                skipped += 1
+                continue
+            if "T" not in start:
+                start_at = f"{start}T00:00:00+00:00"
+                end_at = f"{end or start}T23:59:00+00:00"
+            else:
+                start_at = start.replace("Z", "+00:00")
+                end_at = (end or start).replace("Z", "+00:00")
+            event = {
+                "id": uuid.uuid4().hex[:10],
+                "title": (gev.get("title") or "Google event").strip(),
+                "start_at": start_at,
+                "end_at": end_at,
+                "when": start_at,
+                "duration_minutes": None,
+                "location": gev.get("location"),
+                "notes": gev.get("htmlLink"),
+                "google_event_id": gid,
+                "source": "google",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "cancelled": False,
+                "user_id": uid,
+            }
+            rows.append(event)
+            known.add(gid)
+            pulled += 1
+        _save(rows[-500:])
+
+    if direction_norm in {"push", "both"}:
+        if not confirm_action("Push unsynced local calendar events to Google Calendar."):
+            return {
+                "ok": False,
+                "error": "Push cancelled",
+                "pulled": pulled,
+                "hint": "Allow the confirmation to push local events to Google.",
+            }
+
+        rows = _load()
+        changed = False
+        for ev in rows:
+            if ev.get("cancelled") or ev.get("google_event_id"):
+                continue
+            title = str(ev.get("title") or "").strip()
+            start_iso = str(ev.get("start_at") or "")
+            end_iso = str(ev.get("end_at") or "")
+            if not title or not start_iso:
+                skipped += 1
+                continue
+            try:
+                result = client.create_event(
+                    title=title,
+                    start_iso=start_iso,
+                    end_iso=end_iso or start_iso,
+                    location=str(ev.get("location") or ""),
+                    description=str(ev.get("notes") or ""),
+                )
+                ev["google_event_id"] = result.get("id")
+                ev["source"] = ev.get("source") or "local"
+                changed = True
+                pushed += 1
+            except GoogleOAuthError as exc:
+                errors.append(str(exc))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc))
+        if changed:
+            _save(rows)
+
+    return {
+        "ok": True,
+        "direction": direction_norm,
+        "pulled": pulled,
+        "pushed": pushed,
+        "skipped": skipped,
+        "errors": errors[:5],
+    }

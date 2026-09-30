@@ -1,4 +1,4 @@
-"""Daily briefing tools: on-demand + schedule morning push (local timezone)."""
+"""Daily briefing tools: on-demand + morning/evening schedule."""
 
 from __future__ import annotations
 
@@ -16,11 +16,14 @@ def _schedule_store() -> BriefingScheduleStore:
 
 
 @tool
-def get_daily_briefing() -> dict[str, Any]:
-    """Build a morning/evening-style briefing for the current user.
+def get_daily_briefing(slot: str = "morning") -> dict[str, Any]:
+    """Build a morning or evening-style briefing for the current user.
 
-    Combines weather (if a city is set on the schedule), open todos, due reminders,
-    local calendar, and (if connected) Google Calendar + unread Gmail.
+    Combines weather (Tel Aviv by default), open todos, reminders, local calendar,
+    and (if connected) Google Calendar + unread Gmail.
+
+    Args:
+        slot: ``morning`` or ``evening`` — changes the summary tone.
 
     Returns:
         Structured briefing sections the assistant should summarize conversationally.
@@ -29,21 +32,16 @@ def get_daily_briefing() -> dict[str, Any]:
         uid = get_user_id()
         cfg = _schedule_store().get(uid)
         loc = str(cfg.get("location") or "").strip() or "Tel Aviv"
+        kind = "evening" if str(slot).lower().startswith("eve") else "morning"
         sections = build_briefing(uid, location=loc)
         return {
             "ok": True,
             "briefing": sections,
-            "text": format_briefing_text(sections),
-            "schedule": {
-                "timezone": cfg.get("timezone"),
-                "location": cfg.get("location"),
-                "enabled": cfg.get("enabled"),
-                "hour": cfg.get("hour"),
-                "minute": cfg.get("minute"),
-            },
+            "text": format_briefing_text(sections, slot=kind),  # type: ignore[arg-type]
+            "schedule": cfg,
             "hint": (
-                "Summarize warmly and briefly for voice: weather, what matters today, "
-                "what's overdue, and any unread mail. Offer to help with the top item."
+                "Summarize warmly and briefly for voice: weather, what matters, "
+                "what's overdue, unread mail. Evening: wind-down + one thing for tomorrow."
             ),
         }
     except Exception as exc:  # noqa: BLE001
@@ -57,18 +55,21 @@ def schedule_daily_briefing(
     minute: int = 0,
     timezone_name: str = "Asia/Jerusalem",
     location: str = "Tel Aviv",
+    evening_enabled: bool = False,
+    evening_hour: int = 20,
+    evening_minute: int = 0,
 ) -> dict[str, Any]:
-    """Enable or change the automatic daily briefing push (local clock).
-
-    When enabled, Nexus pushes a briefing over WebSocket / Web Push around the
-    configured local time each day (also appears in the General chat as a system line).
+    """Enable or change automatic morning/evening briefing pushes (local clock).
 
     Args:
-        enabled: Turn the schedule on or off.
-        hour: Local hour (0–23) in ``timezone_name``.
-        minute: Minute (0–59).
-        timezone_name: IANA timezone — default Asia/Jerusalem (Israel).
-        location: City for weather (Open-Meteo) — default Tel Aviv.
+        enabled: Morning briefing on/off.
+        hour: Morning local hour (0–23).
+        minute: Morning minute.
+        timezone_name: IANA timezone (default Asia/Jerusalem).
+        location: City for weather (default Tel Aviv).
+        evening_enabled: Evening briefing on/off.
+        evening_hour: Evening local hour (default 20).
+        evening_minute: Evening minute.
 
     Returns:
         Saved schedule.
@@ -81,6 +82,9 @@ def schedule_daily_briefing(
             minute=int(minute),
             timezone_name=str(timezone_name or "Asia/Jerusalem"),
             location=str(location or "Tel Aviv"),
+            evening_enabled=bool(evening_enabled),
+            evening_hour=int(evening_hour),
+            evening_minute=int(evening_minute),
         )
         return {"ok": True, "schedule": cfg}
     except ValueError as exc:
@@ -91,7 +95,7 @@ def schedule_daily_briefing(
 
 @tool
 def get_briefing_schedule() -> dict[str, Any]:
-    """Return the user's automatic daily briefing schedule (local timezone + city)."""
+    """Return the user's morning + evening briefing schedule."""
     try:
         cfg = _schedule_store().get(get_user_id())
         return {"ok": True, "schedule": cfg}

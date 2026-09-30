@@ -103,6 +103,10 @@ export const api = {
         timezone?: string
         location?: string
         last_sent_day?: string | null
+        evening_enabled?: boolean
+        evening_hour?: number
+        evening_minute?: number
+        evening_last_sent_day?: string | null
       }
       timezone: string
     }>('/api/briefing/schedule'),
@@ -112,6 +116,9 @@ export const api = {
     minute: number
     timezone?: string
     location?: string
+    evening_enabled?: boolean
+    evening_hour?: number
+    evening_minute?: number
   }) =>
     request<{
       schedule: {
@@ -120,6 +127,9 @@ export const api = {
         minute: number
         timezone?: string
         location?: string
+        evening_enabled?: boolean
+        evening_hour?: number
+        evening_minute?: number
       }
       timezone: string
     }>('/api/briefing/schedule', { method: 'PUT', body: JSON.stringify(body) }),

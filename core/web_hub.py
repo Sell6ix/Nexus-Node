@@ -77,6 +77,9 @@ class BriefingScheduleBody(BaseModel):
     minute: int = 0
     timezone: str = "Asia/Jerusalem"
     location: str = "Tel Aviv"
+    evening_enabled: bool = False
+    evening_hour: int = 20
+    evening_minute: int = 0
 
 
 class SpeakBody(BaseModel):
@@ -825,6 +828,9 @@ def create_app(
                 minute=body.minute,
                 timezone_name=body.timezone or "Asia/Jerusalem",
                 location=body.location or "Tel Aviv",
+                evening_enabled=body.evening_enabled,
+                evening_hour=body.evening_hour,
+                evening_minute=body.evening_minute,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -993,15 +999,18 @@ def create_app(
         # Nobody listening and no push subscription — retry next tick.
         return False
 
-    def _send_briefing(user_id: str, text: str) -> bool:
-        live = broker.notify(user_id, {"type": "briefing", "text": text})
-        pushed = push.send(user_id, "Daily briefing", text[:180])
+    def _send_briefing(user_id: str, text: str, title: str = "Morning briefing") -> bool:
+        live = broker.notify(
+            user_id, {"type": "briefing", "text": text, "title": title}
+        )
+        pushed = push.send(user_id, title or "Briefing", text[:180])
         if live or pushed:
             chats.append(user_id, "system", text, "main")
             audit.log(
                 "briefing_delivered",
                 user_id=user_id,
                 text=text[:120],
+                title=title,
                 ws=live,
                 push=pushed,
             )
