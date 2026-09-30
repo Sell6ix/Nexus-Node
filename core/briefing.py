@@ -149,8 +149,8 @@ class BriefingScheduleStore:
                 "enabled": False,
                 "hour": 8,
                 "minute": 0,
-                "timezone": "UTC",
-                "location": "",
+                "timezone": "Asia/Jerusalem",
+                "location": "Tel Aviv",
                 "last_sent_day": None,
             }
         try:
@@ -160,11 +160,11 @@ class BriefingScheduleStore:
                 "enabled": False,
                 "hour": 8,
                 "minute": 0,
-                "timezone": "UTC",
-                "location": "",
+                "timezone": "Asia/Jerusalem",
+                "location": "Tel Aviv",
                 "last_sent_day": None,
             }
-        tz_name = str(raw.get("timezone") or "UTC").strip() or "UTC"
+        tz_name = str(raw.get("timezone") or "Asia/Jerusalem").strip() or "Asia/Jerusalem"
         # Validate timezone early
         _ = _tz(tz_name)
         return {
@@ -187,8 +187,10 @@ class BriefingScheduleStore:
         location: str | None = None,
     ) -> dict[str, Any]:
         cur = self.get(user_id)
-        tz_name = (timezone_name if timezone_name is not None else cur.get("timezone")) or "UTC"
-        tz_name = str(tz_name).strip() or "UTC"
+        tz_name = (
+            timezone_name if timezone_name is not None else cur.get("timezone")
+        ) or "Asia/Jerusalem"
+        tz_name = str(tz_name).strip() or "Asia/Jerusalem"
         try:
             ZoneInfo(tz_name)
         except ZoneInfoNotFoundError as exc:
@@ -223,7 +225,7 @@ class BriefingScheduleStore:
             cfg = self.get(uid)
             if not cfg.get("enabled"):
                 continue
-            local = base_utc.astimezone(_tz(str(cfg.get("timezone") or "UTC")))
+            local = base_utc.astimezone(_tz(str(cfg.get("timezone") or "Asia/Jerusalem")))
             day = local.date().isoformat()
             if cfg.get("last_sent_day") == day:
                 continue
@@ -267,9 +269,12 @@ class BriefingNotifier:
         for uid in self.store.due_users(now=base_utc):
             try:
                 cfg = self.store.get(uid)
-                local = base_utc.astimezone(_tz(str(cfg.get("timezone") or "UTC")))
+                local = base_utc.astimezone(
+                    _tz(str(cfg.get("timezone") or "Asia/Jerusalem"))
+                )
                 day = local.date().isoformat()
-                sections = build_briefing(uid, location=str(cfg.get("location") or "") or None)
+                loc = str(cfg.get("location") or "").strip() or "Tel Aviv"
+                sections = build_briefing(uid, location=loc)
                 text = format_briefing_text(sections)
                 ok = self.send(uid, text)
                 if ok is False:

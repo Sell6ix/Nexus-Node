@@ -1141,10 +1141,8 @@ function SettingsPanel({
   const [briefEnabled, setBriefEnabled] = useState(false)
   const [briefHour, setBriefHour] = useState(8)
   const [briefMinute, setBriefMinute] = useState(0)
-  const [briefTz, setBriefTz] = useState(
-    () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-  )
-  const [briefLocation, setBriefLocation] = useState('')
+  const [briefTz, setBriefTz] = useState('Asia/Jerusalem')
+  const [briefLocation, setBriefLocation] = useState('Tel Aviv')
 
   async function reloadContacts() {
     const res = await api.contacts()
@@ -1183,12 +1181,8 @@ function SettingsPanel({
         setBriefEnabled(Boolean(r.schedule?.enabled))
         setBriefHour(Number(r.schedule?.hour ?? 8))
         setBriefMinute(Number(r.schedule?.minute ?? 0))
-        setBriefTz(
-          r.schedule?.timezone ||
-            Intl.DateTimeFormat().resolvedOptions().timeZone ||
-            'UTC',
-        )
-        setBriefLocation(r.schedule?.location || '')
+        setBriefTz(r.schedule?.timezone || 'Asia/Jerusalem')
+        setBriefLocation(r.schedule?.location || 'Tel Aviv')
       })
       .catch(() => undefined)
     void reloadContacts().catch(() => undefined)
@@ -1279,7 +1273,7 @@ function SettingsPanel({
         </p>
         <p className="text-xs text-[var(--text)]">{assistantNote || 'Loading…'}</p>
         <p className="text-xs text-[var(--muted)]">
-          Try: «включи брифинг в 8 по Москве» · «что в почте» · «напиши Маше в WhatsApp…»
+          Try: «включи брифинг в 8 по Тель-Авиву» · «что в почте» · «напиши Маше в WhatsApp…»
         </p>
       </div>
 
@@ -1324,13 +1318,13 @@ function SettingsPanel({
         <input
           value={briefTz}
           onChange={(e) => setBriefTz(e.target.value)}
-          placeholder="timezone (e.g. Europe/Moscow)"
+          placeholder="timezone (Asia/Jerusalem)"
           className="w-full rounded-xl bg-[var(--ink)]/60 border border-[var(--line)] px-3 py-2 text-sm"
         />
         <input
           value={briefLocation}
           onChange={(e) => setBriefLocation(e.target.value)}
-          placeholder="city for weather (e.g. Moscow)"
+          placeholder="city for weather (Tel Aviv)"
           className="w-full rounded-xl bg-[var(--ink)]/60 border border-[var(--line)] px-3 py-2 text-sm"
         />
         <button
@@ -1342,8 +1336,8 @@ function SettingsPanel({
                 enabled: briefEnabled,
                 hour: briefHour,
                 minute: briefMinute,
-                timezone: briefTz || 'UTC',
-                location: briefLocation,
+                timezone: briefTz || 'Asia/Jerusalem',
+                location: briefLocation || 'Tel Aviv',
               })
               .then(() => onToast('Briefing schedule saved'))
               .catch((e) => onToast(e.message))

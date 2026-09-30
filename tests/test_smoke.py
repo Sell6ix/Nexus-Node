@@ -98,13 +98,21 @@ def test_briefing_schedule(tmp_path: Path) -> None:
     store.mark_sent("u1", "2026-03-15")
     assert "u1" not in store.due_users(now=now)
 
-    # Moscow (UTC+3): 08:00 local = 05:00 UTC
-    store.set("u2", enabled=True, hour=8, minute=0, timezone_name="Europe/Moscow", location="Moscow")
-    early = datetime(2026, 3, 15, 4, 59, tzinfo=timezone.utc)
+    # Israel (UTC+2 winter): 08:00 Asia/Jerusalem = 06:00 UTC
+    store.set(
+        "u2",
+        enabled=True,
+        hour=8,
+        minute=0,
+        timezone_name="Asia/Jerusalem",
+        location="Tel Aviv",
+    )
+    early = datetime(2026, 1, 15, 5, 59, tzinfo=timezone.utc)
     assert "u2" not in store.due_users(now=early)
-    local_due = datetime(2026, 3, 15, 5, 1, tzinfo=timezone.utc)
+    local_due = datetime(2026, 1, 15, 6, 1, tzinfo=timezone.utc)
     assert "u2" in store.due_users(now=local_due)
-    assert store.get("u2")["location"] == "Moscow"
+    assert store.get("u2")["location"] == "Tel Aviv"
+    assert store.get("missing")["timezone"] == "Asia/Jerusalem"
 
     text = format_briefing_text(
         {
@@ -114,18 +122,18 @@ def test_briefing_schedule(tmp_path: Path) -> None:
             "google": {"connected": False},
             "weather": {
                 "ok": True,
-                "place": {"name": "Moscow"},
-                "temperature_c": -2,
-                "summary": "overcast",
-                "today_high_c": 0,
-                "today_low_c": -5,
-                "precip_chance_pct": 20,
+                "place": {"name": "Tel Aviv"},
+                "temperature_c": 24,
+                "summary": "partly cloudy",
+                "today_high_c": 27,
+                "today_low_c": 18,
+                "precip_chance_pct": 10,
             },
         }
     )
     assert "Buy milk" in text
-    assert "Moscow" in text
-    assert "overcast" in text
+    assert "Tel Aviv" in text
+    assert "partly cloudy" in text
 
 
 def test_weather_code_label() -> None:

@@ -28,7 +28,8 @@ def get_daily_briefing() -> dict[str, Any]:
     try:
         uid = get_user_id()
         cfg = _schedule_store().get(uid)
-        sections = build_briefing(uid, location=str(cfg.get("location") or "") or None)
+        loc = str(cfg.get("location") or "").strip() or "Tel Aviv"
+        sections = build_briefing(uid, location=loc)
         return {
             "ok": True,
             "briefing": sections,
@@ -54,8 +55,8 @@ def schedule_daily_briefing(
     enabled: bool = True,
     hour: int = 8,
     minute: int = 0,
-    timezone_name: str = "Europe/Moscow",
-    location: str = "",
+    timezone_name: str = "Asia/Jerusalem",
+    location: str = "Tel Aviv",
 ) -> dict[str, Any]:
     """Enable or change the automatic daily briefing push (local clock).
 
@@ -66,8 +67,8 @@ def schedule_daily_briefing(
         enabled: Turn the schedule on or off.
         hour: Local hour (0–23) in ``timezone_name``.
         minute: Minute (0–59).
-        timezone_name: IANA timezone, e.g. Europe/Moscow, Asia/Yekaterinburg, UTC.
-        location: City for weather (Open-Meteo), e.g. Moscow, London. Empty skips weather.
+        timezone_name: IANA timezone — default Asia/Jerusalem (Israel).
+        location: City for weather (Open-Meteo) — default Tel Aviv.
 
     Returns:
         Saved schedule.
@@ -78,8 +79,8 @@ def schedule_daily_briefing(
             enabled=bool(enabled),
             hour=int(hour),
             minute=int(minute),
-            timezone_name=str(timezone_name or "UTC"),
-            location=str(location or ""),
+            timezone_name=str(timezone_name or "Asia/Jerusalem"),
+            location=str(location or "Tel Aviv"),
         )
         return {"ok": True, "schedule": cfg}
     except ValueError as exc:

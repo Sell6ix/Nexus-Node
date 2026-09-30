@@ -75,8 +75,8 @@ class BriefingScheduleBody(BaseModel):
     enabled: bool = True
     hour: int = 8
     minute: int = 0
-    timezone: str = "UTC"
-    location: str = ""
+    timezone: str = "Asia/Jerusalem"
+    location: str = "Tel Aviv"
 
 
 class SpeakBody(BaseModel):
@@ -811,7 +811,7 @@ def create_app(
     @app.get("/api/briefing/schedule")
     def get_briefing_schedule_api(account: Account = Depends(require_account)) -> dict[str, Any]:
         cfg = briefing_schedules.get(account.id)
-        return {"schedule": cfg, "timezone": cfg.get("timezone") or "UTC"}
+        return {"schedule": cfg, "timezone": cfg.get("timezone") or "Asia/Jerusalem"}
 
     @app.put("/api/briefing/schedule")
     def put_briefing_schedule_api(
@@ -823,12 +823,12 @@ def create_app(
                 enabled=body.enabled,
                 hour=body.hour,
                 minute=body.minute,
-                timezone_name=body.timezone or "UTC",
-                location=body.location or "",
+                timezone_name=body.timezone or "Asia/Jerusalem",
+                location=body.location or "Tel Aviv",
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        return {"schedule": cfg, "timezone": cfg.get("timezone") or "UTC"}
+        return {"schedule": cfg, "timezone": cfg.get("timezone") or "Asia/Jerusalem"}
 
     @app.get("/api/chat")
     def get_chat(
