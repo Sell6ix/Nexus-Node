@@ -3,6 +3,19 @@ import type { FormEvent } from 'react'
 import { api, getToken, setToken, wsUrl } from './api'
 import type { User, Device } from './api'
 import { enablePush, registerServiceWorker, showLocalNotification } from './push'
+import {
+  loadVoicePrefs,
+  saveVoicePrefs,
+  speechRecognitionSupported,
+  speechSynthesisSupported,
+  startListening,
+  speakText,
+  stopSpeaking,
+  recordAudioBlob,
+  stopActiveRecording,
+  type ListenHandle,
+  type VoicePrefs,
+} from './voice'
 
 type Msg = { role: 'user' | 'assistant' | 'system'; text: string }
 type ConfirmReq = { id: string; prompt: string; timeout: number }
@@ -14,7 +27,10 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null)
   const [error, setError] = useState('')
   const [tab, setTab] = useState<Tab>('chat')
-  const welcome: Msg = { role: 'system', text: 'Ask anything — notes, todos, PC stats, open a URL…' }
+  const welcome: Msg = {
+    role: 'system',
+    text: 'Ask anything — or tap the mic and talk. Notes, search, calendar, diary…',
+  }
   const [messages, setMessages] = useState<Msg[]>([welcome])
   const [chatReady, setChatReady] = useState(false)
   const [input, setInput] = useState('')
@@ -22,7 +38,12 @@ export default function App() {
   const [authBusy, setAuthBusy] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmReq | null>(null)
   const [toast, setToast] = useState('')
+  const [voicePrefs, setVoicePrefs] = useState<VoicePrefs>(() => loadVoicePrefs())
+  const [listening, setListening] = useState(false)
+  const [recordingFallback, setRecordingFallback] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const listenRef = useRef<ListenHandle | null>(null)
+  const busyRef = useRef(false)
 
   async function loadChat() {
     try {
@@ -64,8 +85,28 @@ export default function App() {
   }, [messages, busy])
 
   useEffect(() => {
+    busyRef.current = busy
+  }, [busy])
+
+  useEffect(() => {
+    saveVoicePrefs(voicePrefs)
+  }, [voicePrefs])
+
+  useEffect(() => {
     if (boot !== 'app') return
     void registerServiceWorker()
+    // Warm voices list (Chrome loads async)
+    if (speechSynthesisSupported()) {
+      window.speechSynthesis.getVoices()
+      window.speechSynthesis.onvoiceschanged = () => {
+        window.speechSynthesis.getVoices()
+      }
+    }
+    return () => {
+      listenRef.current?.stop()
+      stopSpeaking()
+      stopActiveRecording()
+    }
   }, [boot])
 
   useEffect(() => {
@@ -88,6 +129,8 @@ export default function App() {
             setToast(data.text || 'Reminder')
             setMessages((m) => [...m, { role: 'system', text: data.text }])
             showLocalNotification('Nexus Node', data.text)
+            const prefs = loadVoicePrefs()
+            if (prefs.replies && data.text) speakText(String(data.text), prefs.lang)
           }
         } catch {
           /* ignore */
@@ -140,16 +183,19 @@ export default function App() {
     }
   }
 
-  async function sendChat(e: FormEvent) {
-    e.preventDefault()
-    const text = input.trim()
-    if (!text || busy) return
+  async function sendMessage(textRaw: string) {
+    const text = textRaw.trim()
+    if (!text || busyRef.current) return
     setInput('')
     setMessages((m) => [...m, { role: 'user', text }])
     setBusy(true)
     try {
       const res = await api.chat(text)
-      setMessages((m) => [...m, { role: 'assistant', text: res.reply || '(empty)' }])
+      const reply = res.reply || '(empty)'
+      setMessages((m) => [...m, { role: 'assistant', text: reply }])
+      if (voicePrefs.replies) {
+        speakText(reply, voicePrefs.lang)
+      }
     } catch (err) {
       setMessages((m) => [
         ...m,
@@ -157,6 +203,84 @@ export default function App() {
       ])
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function sendChat(e: FormEvent) {
+    e.preventDefault()
+    await sendMessage(input)
+  }
+
+  function stopMic() {
+    listenRef.current?.stop()
+    listenRef.current = null
+    stopActiveRecording()
+    setListening(false)
+    setRecordingFallback(false)
+  }
+
+  async function toggleMic() {
+    if (listening || recordingFallback) {
+      stopMic()
+      return
+    }
+    if (busy) return
+    stopSpeaking()
+    setToast('')
+
+    if (speechRecognitionSupported()) {
+      setListening(true)
+      const handle = startListening({
+        lang: voicePrefs.lang,
+        onInterim: (t) => setInput(t),
+        onFinal: (t) => {
+          listenRef.current = null
+          setListening(false)
+          setInput(t)
+          if (voicePrefs.autoSend) void sendMessage(t)
+        },
+        onError: (msg) => {
+          listenRef.current = null
+          setListening(false)
+          setToast(msg)
+        },
+        onEnd: () => {
+          listenRef.current = null
+          setListening(false)
+        },
+      })
+      if (!handle) {
+        setListening(false)
+        setToast('Could not start voice recognition')
+        return
+      }
+      listenRef.current = handle
+      return
+    }
+
+    // Whisper fallback: tap once to start, tap again to stop & transcribe
+    if (!user?.has_api_key) {
+      setToast('Voice needs Chrome/Edge speech, or an AI key for Whisper fallback.')
+      return
+    }
+    setRecordingFallback(true)
+    setToast('Listening… tap mic again when done')
+    try {
+      const blob = await recordAudioBlob(30000)
+      setRecordingFallback(false)
+      if (blob.size < 1000) {
+        setToast('Recording too short')
+        return
+      }
+      setToast('Transcribing…')
+      const lang = voicePrefs.lang.split('-')[0] || ''
+      const res = await api.transcribe(blob, lang)
+      setToast('')
+      setInput(res.text)
+      if (voicePrefs.autoSend) void sendMessage(res.text)
+    } catch (e) {
+      setRecordingFallback(false)
+      setToast(e instanceof Error ? e.message : 'Voice recording failed')
     }
   }
 
@@ -256,18 +380,38 @@ export default function App() {
 
       {tab === 'chat' && (
         <section className="flex-1 flex flex-col min-h-0">
-          <div className="flex items-center justify-between gap-2 pb-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-2">
             <p className="text-xs text-[var(--muted)]">
-              {chatReady ? 'Saved on this hub — survives reload.' : 'Loading chat…'}
+              {listening || recordingFallback
+                ? 'Listening… tap mic to stop'
+                : chatReady
+                  ? 'Saved on this hub — survives reload.'
+                  : 'Loading chat…'}
             </p>
-            <button
-              type="button"
-              onClick={() => void clearChat()}
-              disabled={busy || !chatReady}
-              className="text-xs text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-40 px-2 py-1"
-            >
-              Clear chat
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() =>
+                  setVoicePrefs((p) => ({ ...p, replies: !p.replies }))
+                }
+                className={`text-xs px-2 py-1 rounded-lg border ${
+                  voicePrefs.replies
+                    ? 'border-[var(--accent)] text-[var(--accent)]'
+                    : 'border-[var(--line)] text-[var(--muted)]'
+                }`}
+                title="Speak assistant replies aloud"
+              >
+                {voicePrefs.replies ? 'Voice replies on' : 'Voice replies'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void clearChat()}
+                disabled={busy || !chatReady}
+                className="text-xs text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-40 px-2 py-1"
+              >
+                Clear
+              </button>
+            </div>
           </div>
           <div className="flex-1 overflow-y-auto space-y-3 pb-3">
             {messages.map((m, i) => (
@@ -278,12 +422,28 @@ export default function App() {
           </div>
           <form onSubmit={sendChat} className="sticky bottom-0 pt-2 pb-3 bg-gradient-to-t from-[var(--ink)] via-[var(--ink)] to-transparent">
             <div className="flex gap-2 items-end rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-2">
+              <button
+                type="button"
+                onClick={() => void toggleMic()}
+                disabled={busy && !listening && !recordingFallback}
+                aria-pressed={listening || recordingFallback}
+                aria-label={listening || recordingFallback ? 'Stop listening' : 'Talk'}
+                className={`shrink-0 min-w-14 h-12 px-3 rounded-2xl font-semibold text-sm transition disabled:opacity-40 ${
+                  listening || recordingFallback
+                    ? 'bg-[var(--danger)] text-white animate-pulse'
+                    : 'bg-[var(--panel-2)] border border-[var(--line)] text-[var(--text)] hover:border-[var(--accent)]/50'
+                }`}
+              >
+                {listening || recordingFallback ? 'Stop' : 'Mic'}
+              </button>
               <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 rows={2}
-                placeholder="Message Nexus…"
-                className="flex-1 resize-none bg-transparent outline-none px-2 py-1 placeholder:text-[var(--muted)]"
+                placeholder={
+                  listening || recordingFallback ? 'Listening…' : 'Message or tap mic…'
+                }
+                className="flex-1 resize-none bg-transparent outline-none px-2 py-1 placeholder:text-[var(--muted)] min-h-[3rem]"
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault()
@@ -294,10 +454,38 @@ export default function App() {
               <button
                 type="submit"
                 disabled={busy || !input.trim()}
-                className="shrink-0 rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] font-semibold px-4 py-2 disabled:opacity-40"
+                className="shrink-0 rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] font-semibold px-4 py-2 disabled:opacity-40 self-end"
               >
                 Send
               </button>
+            </div>
+            <div className="flex flex-wrap gap-2 mt-2 px-1">
+              <label className="text-xs text-[var(--muted)] flex items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={voicePrefs.autoSend}
+                  onChange={(e) =>
+                    setVoicePrefs((p) => ({ ...p, autoSend: e.target.checked }))
+                  }
+                />
+                Auto-send after speech
+              </label>
+              <select
+                value={voicePrefs.lang}
+                onChange={(e) => setVoicePrefs((p) => ({ ...p, lang: e.target.value }))}
+                className="text-xs bg-[var(--panel)] border border-[var(--line)] rounded-lg px-2 py-1 text-[var(--muted)]"
+                aria-label="Voice language"
+              >
+                <option value="ru-RU">Русский</option>
+                <option value="en-US">English</option>
+                <option value="uk-UA">Українська</option>
+                <option value="de-DE">Deutsch</option>
+              </select>
+              {!speechRecognitionSupported() && (
+                <span className="text-xs text-[var(--muted)]">
+                  Browser STT unavailable — Whisper fallback if AI key set
+                </span>
+              )}
             </div>
           </form>
         </section>

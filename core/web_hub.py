@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -458,6 +458,64 @@ def create_app(
         if not ok:
             raise HTTPException(404, "Contact not found")
         return {"ok": True}
+
+    @app.post("/api/voice/transcribe")
+    async def voice_transcribe(
+        file: UploadFile = File(...),
+        language: str = Form(default=""),
+        account: Account = Depends(require_account),
+    ) -> dict[str, Any]:
+        """Whisper fallback when the browser has no SpeechRecognition."""
+        api_key = (account.api_key or settings.openai_api_key or "").strip()
+        if not api_key:
+            raise HTTPException(
+                400,
+                "Add your AI API key in Settings to use Whisper voice fallback.",
+            )
+        raw = await file.read()
+        if not raw:
+            raise HTTPException(400, "Empty audio")
+        if len(raw) > 25 * 1024 * 1024:
+            raise HTTPException(400, "Audio too large (max 25MB)")
+        base = (account.api_base_url or settings.openai_base_url or "https://api.openai.com/v1").rstrip(
+            "/"
+        )
+        filename = file.filename or "voice.webm"
+        lang = (language or "").strip()
+        if lang and "-" in lang:
+            lang = lang.split("-", 1)[0]
+
+        def _whisper() -> str:
+            import io
+            import httpx
+
+            data: dict[str, str] = {"model": "whisper-1"}
+            if lang:
+                data["language"] = lang
+            with httpx.Client(timeout=120.0) as client:
+                resp = client.post(
+                    f"{base}/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    files={
+                        "file": (
+                            filename,
+                            io.BytesIO(raw),
+                            file.content_type or "application/octet-stream",
+                        )
+                    },
+                    data=data,
+                )
+            if resp.status_code >= 400:
+                raise RuntimeError(resp.text[:400] or f"HTTP {resp.status_code}")
+            return str((resp.json() or {}).get("text") or "").strip()
+
+        try:
+            text = await asyncio.to_thread(_whisper)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"Transcription failed: {exc}") from exc
+        if not text:
+            raise HTTPException(400, "No speech detected")
+        return {"text": text}
 
     @app.get("/api/chat")
     def get_chat(account: Account = Depends(require_account)) -> dict[str, Any]:

@@ -31,7 +31,8 @@ export function setToken(token: string | null) {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers || {})
-  if (!headers.has('Content-Type') && init.body) {
+  const isForm = typeof FormData !== 'undefined' && init.body instanceof FormData
+  if (!headers.has('Content-Type') && init.body && !isForm) {
     headers.set('Content-Type', 'application/json')
   }
   const token = getToken()
@@ -104,6 +105,13 @@ export const api = {
   pushVapid: () => request<{ publicKey: string }>('/api/push/vapid'),
   pushSubscribe: (body: { endpoint: string; keys: { p256dh: string; auth: string } }) =>
     request<{ ok: boolean }>('/api/push/subscribe', { method: 'POST', body: JSON.stringify(body) }),
+  transcribe: (blob: Blob, lang = '') => {
+    const fd = new FormData()
+    const ext = blob.type.includes('mp4') ? 'mp4' : blob.type.includes('ogg') ? 'ogg' : 'webm'
+    fd.append('file', blob, `voice.${ext}`)
+    if (lang) fd.append('language', lang)
+    return request<{ text: string }>('/api/voice/transcribe', { method: 'POST', body: fd })
+  },
 }
 
 export function wsUrl(token: string): string {

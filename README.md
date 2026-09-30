@@ -22,6 +22,7 @@ Phone or PC browser (PWA)
 - Chat history is saved per account on the hub (`data/chats/`) and restores after reload
 - Web search + page fetch; contacts with confirmed email / Telegram send
 - Personal memory, diary (dated journal), and a local hub calendar
+- Voice chat: mic button (browser speech or Whisper), optional spoken replies
 
 ## Quick start
 
