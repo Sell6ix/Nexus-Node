@@ -96,12 +96,31 @@ export const api = {
     }),
   getBriefingSchedule: () =>
     request<{
-      schedule: { enabled: boolean; hour: number; minute: number; last_sent_day?: string | null }
+      schedule: {
+        enabled: boolean
+        hour: number
+        minute: number
+        timezone?: string
+        location?: string
+        last_sent_day?: string | null
+      }
       timezone: string
     }>('/api/briefing/schedule'),
-  setBriefingSchedule: (body: { enabled: boolean; hour: number; minute: number }) =>
+  setBriefingSchedule: (body: {
+    enabled: boolean
+    hour: number
+    minute: number
+    timezone?: string
+    location?: string
+  }) =>
     request<{
-      schedule: { enabled: boolean; hour: number; minute: number }
+      schedule: {
+        enabled: boolean
+        hour: number
+        minute: number
+        timezone?: string
+        location?: string
+      }
       timezone: string
     }>('/api/briefing/schedule', { method: 'PUT', body: JSON.stringify(body) }),
   speak: async (text: string, language = '') => {
@@ -163,8 +182,25 @@ export const api = {
       telegram_messaging: { ready: boolean }
       whatsapp_messaging: { ready: boolean }
       contacts: { ready: boolean }
-      briefing: { ready: boolean; schedule?: { enabled: boolean; hour: number; minute: number } }
+      briefing: {
+        ready: boolean
+        weather?: boolean
+        schedule?: {
+          enabled: boolean
+          hour: number
+          minute: number
+          timezone?: string
+          location?: string
+        }
+      }
       hq_voice: { ready: boolean }
+      uploads?: { ready: boolean; image_describe?: boolean }
+      setup?: {
+        has_api_key: boolean
+        briefing_enabled: boolean
+        google_connected: boolean
+        push_configured: boolean
+      }
     }>('/api/assistant'),
   contacts: () =>
     request<{

@@ -23,7 +23,8 @@ Phone or PC browser (PWA)
 - Web search + page fetch; contacts with confirmed email / Telegram / WhatsApp Cloud send
 - Personal memory, diary (dated journal), and a local hub calendar
 - HQ voice: Whisper STT + OpenAI TTS (toggle off for browser speech)
-- Google Gmail/Calendar OAuth; on-demand + **scheduled** daily briefing (UTC push)
+- Google Gmail/Calendar OAuth; on-demand + **scheduled** daily briefing (local timezone + weather)
+- Image attach → vision describe/OCR when an AI key is set; first-run setup checklist
 - App-open / daily reminders, chat file attach, owner backup zip
 - PWA home-screen shortcuts: Chat, Voice, Briefing
 

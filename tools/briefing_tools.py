@@ -1,13 +1,13 @@
-"""Daily briefing tools: on-demand + schedule morning push."""
+"""Daily briefing tools: on-demand + schedule morning push (local timezone)."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from core.briefing import BriefingScheduleStore, build_briefing, format_briefing_text
 from core.context import get_user_id
 from core.registry import tool
-from pathlib import Path
 
 
 def _schedule_store() -> BriefingScheduleStore:
@@ -19,21 +19,29 @@ def _schedule_store() -> BriefingScheduleStore:
 def get_daily_briefing() -> dict[str, Any]:
     """Build a morning/evening-style briefing for the current user.
 
-    Combines open todos, due reminders, local calendar, and (if connected)
-    Google Calendar + unread Gmail count/snippets.
+    Combines weather (if a city is set on the schedule), open todos, due reminders,
+    local calendar, and (if connected) Google Calendar + unread Gmail.
 
     Returns:
         Structured briefing sections the assistant should summarize conversationally.
     """
     try:
         uid = get_user_id()
-        sections = build_briefing(uid)
+        cfg = _schedule_store().get(uid)
+        sections = build_briefing(uid, location=str(cfg.get("location") or "") or None)
         return {
             "ok": True,
             "briefing": sections,
             "text": format_briefing_text(sections),
+            "schedule": {
+                "timezone": cfg.get("timezone"),
+                "location": cfg.get("location"),
+                "enabled": cfg.get("enabled"),
+                "hour": cfg.get("hour"),
+                "minute": cfg.get("minute"),
+            },
             "hint": (
-                "Summarize warmly and briefly for voice: what matters today, "
+                "Summarize warmly and briefly for voice: weather, what matters today, "
                 "what's overdue, and any unread mail. Offer to help with the top item."
             ),
         }
@@ -44,18 +52,22 @@ def get_daily_briefing() -> dict[str, Any]:
 @tool
 def schedule_daily_briefing(
     enabled: bool = True,
-    hour_utc: int = 8,
+    hour: int = 8,
     minute: int = 0,
+    timezone_name: str = "Europe/Moscow",
+    location: str = "",
 ) -> dict[str, Any]:
-    """Enable or change the automatic daily briefing push (UTC clock).
+    """Enable or change the automatic daily briefing push (local clock).
 
     When enabled, Nexus pushes a briefing over WebSocket / Web Push around the
-    configured UTC time each day (also appears in the General chat as a system line).
+    configured local time each day (also appears in the General chat as a system line).
 
     Args:
         enabled: Turn the schedule on or off.
-        hour_utc: Hour in UTC (0–23). Convert from local time when talking to the user.
+        hour: Local hour (0–23) in ``timezone_name``.
         minute: Minute (0–59).
+        timezone_name: IANA timezone, e.g. Europe/Moscow, Asia/Yekaterinburg, UTC.
+        location: City for weather (Open-Meteo), e.g. Moscow, London. Empty skips weather.
 
     Returns:
         Saved schedule.
@@ -64,18 +76,23 @@ def schedule_daily_briefing(
         cfg = _schedule_store().set(
             get_user_id(),
             enabled=bool(enabled),
-            hour=int(hour_utc),
+            hour=int(hour),
             minute=int(minute),
+            timezone_name=str(timezone_name or "UTC"),
+            location=str(location or ""),
         )
-        return {"ok": True, "schedule": cfg, "timezone": "UTC"}
+        return {"ok": True, "schedule": cfg}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
 
 
 @tool
 def get_briefing_schedule() -> dict[str, Any]:
-    """Return the user's automatic daily briefing schedule (UTC)."""
+    """Return the user's automatic daily briefing schedule (local timezone + city)."""
     try:
-        return {"ok": True, "schedule": _schedule_store().get(get_user_id()), "timezone": "UTC"}
+        cfg = _schedule_store().get(get_user_id())
+        return {"ok": True, "schedule": cfg}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}

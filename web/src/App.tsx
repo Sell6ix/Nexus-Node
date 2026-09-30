@@ -51,6 +51,15 @@ export default function App() {
   const [listening, setListening] = useState(false)
   const [recordingFallback, setRecordingFallback] = useState(false)
   const [pendingFiles, setPendingFiles] = useState<{ id: string; filename: string }[]>([])
+  const [setup, setSetup] = useState<{
+    has_api_key: boolean
+    briefing_enabled: boolean
+    google_connected: boolean
+    push_configured: boolean
+  } | null>(null)
+  const [setupDismissed, setSetupDismissed] = useState(
+    () => localStorage.getItem('nexus_setup_dismissed') === '1',
+  )
   const fileInputRef = useRef<HTMLInputElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const listenRef = useRef<ListenHandle | null>(null)
@@ -141,6 +150,12 @@ export default function App() {
   useEffect(() => {
     if (boot !== 'app') return
     void registerServiceWorker()
+    void api
+      .assistant()
+      .then((a) => {
+        if (a.setup) setSetup(a.setup)
+      })
+      .catch(() => undefined)
     // Warm voices list (Chrome loads async)
     if (speechSynthesisSupported()) {
       window.speechSynthesis.getVoices()
@@ -154,6 +169,20 @@ export default function App() {
       stopActiveRecording()
     }
   }, [boot])
+
+  useEffect(() => {
+    if (boot !== 'app' || !user) return
+    setSetup((s) =>
+      s
+        ? { ...s, has_api_key: Boolean(user.has_api_key) }
+        : {
+            has_api_key: Boolean(user.has_api_key),
+            briefing_enabled: false,
+            google_connected: false,
+            push_configured: false,
+          },
+    )
+  }, [boot, user?.has_api_key])
 
   useEffect(() => {
     if (boot !== 'app' || !chatReady || deepLinkDone.current) return
@@ -499,19 +528,83 @@ export default function App() {
         ))}
       </nav>
 
-      {!user.has_api_key && (
-        <button
-          type="button"
-          onClick={() => setTab('settings')}
-          className="mb-3 text-left rounded-2xl border border-[var(--warn)]/40 bg-[var(--panel)] px-4 py-3"
-        >
-          <div className="text-sm font-medium">Finish setup</div>
-          <p className="text-xs text-[var(--muted)] mt-1">
-            Add your AI API key in Settings — each person uses their own. Then
-            Enable notifications if you want closed-app reminders.
-          </p>
-        </button>
-      )}
+      {(() => {
+        const steps = [
+          {
+            ok: Boolean(setup?.has_api_key ?? user.has_api_key),
+            label: 'AI API key',
+            hint: 'Settings → paste your key',
+          },
+          {
+            ok: Boolean(setup?.push_configured),
+            label: 'Notifications',
+            hint: 'Settings → Enable notifications',
+          },
+          {
+            ok: Boolean(setup?.briefing_enabled),
+            label: 'Morning briefing',
+            hint: 'Settings → local time + city',
+          },
+          {
+            ok: Boolean(setup?.google_connected),
+            label: 'Google (optional)',
+            hint: 'Gmail + Calendar',
+          },
+        ]
+        const done = steps.filter((s) => s.ok).length
+        const requiredDone = steps.slice(0, 3).every((s) => s.ok)
+        if (setupDismissed && requiredDone) return null
+        if (setupDismissed && (setup?.has_api_key ?? user.has_api_key)) return null
+        return (
+          <div className="mb-3 rounded-2xl border border-[var(--warn)]/40 bg-[var(--panel)] px-4 py-3 space-y-2">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <div className="text-sm font-medium">Get ready ({done}/{steps.length})</div>
+                <p className="text-xs text-[var(--muted)] mt-0.5">
+                  A few steps so reminders, briefing, and chat work on phone + PC.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="text-xs text-[var(--muted)] hover:text-[var(--text)] shrink-0"
+                onClick={() => {
+                  localStorage.setItem('nexus_setup_dismissed', '1')
+                  setSetupDismissed(true)
+                }}
+              >
+                Dismiss
+              </button>
+            </div>
+            <ul className="space-y-1.5">
+              {steps.map((s) => (
+                <li key={s.label} className="flex items-center gap-2 text-xs">
+                  <span
+                    className={
+                      s.ok ? 'text-[var(--accent)]' : 'text-[var(--muted)]'
+                    }
+                    aria-hidden
+                  >
+                    {s.ok ? '✓' : '○'}
+                  </span>
+                  <span className={s.ok ? 'text-[var(--muted)] line-through' : ''}>
+                    {s.label}
+                  </span>
+                  {!s.ok && (
+                    <span className="text-[var(--muted)]">— {s.hint}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              onClick={() => setTab('settings')}
+              className="text-xs font-semibold text-[var(--accent)]"
+            >
+              Open Settings →
+            </button>
+          </div>
+        )
+      })()}
 
       {tab === 'chat' && (
         <section className="flex-1 flex flex-col min-h-0">
@@ -1048,6 +1141,10 @@ function SettingsPanel({
   const [briefEnabled, setBriefEnabled] = useState(false)
   const [briefHour, setBriefHour] = useState(8)
   const [briefMinute, setBriefMinute] = useState(0)
+  const [briefTz, setBriefTz] = useState(
+    () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+  )
+  const [briefLocation, setBriefLocation] = useState('')
 
   async function reloadContacts() {
     const res = await api.contacts()
@@ -1086,6 +1183,12 @@ function SettingsPanel({
         setBriefEnabled(Boolean(r.schedule?.enabled))
         setBriefHour(Number(r.schedule?.hour ?? 8))
         setBriefMinute(Number(r.schedule?.minute ?? 0))
+        setBriefTz(
+          r.schedule?.timezone ||
+            Intl.DateTimeFormat().resolvedOptions().timeZone ||
+            'UTC',
+        )
+        setBriefLocation(r.schedule?.location || '')
       })
       .catch(() => undefined)
     void reloadContacts().catch(() => undefined)
@@ -1176,15 +1279,15 @@ function SettingsPanel({
         </p>
         <p className="text-xs text-[var(--text)]">{assistantNote || 'Loading…'}</p>
         <p className="text-xs text-[var(--muted)]">
-          Try: «включи брифинг в 8 UTC» · «что в почте» · «напиши Маше в WhatsApp…»
+          Try: «включи брифинг в 8 по Москве» · «что в почте» · «напиши Маше в WhatsApp…»
         </p>
       </div>
 
       <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">
         <div className="font-medium">Morning briefing (auto)</div>
         <p className="text-xs text-[var(--muted)]">
-          Push a daily summary over WebSocket / notifications at a UTC time. Enable
-          phone notifications below so it can wake the device.
+          Daily summary at a local time (your timezone). Weather uses the city below
+          (Open-Meteo). Enable phone notifications so it can wake the device.
         </p>
         <label className="text-sm flex items-center gap-2">
           <input
@@ -1196,7 +1299,7 @@ function SettingsPanel({
         </label>
         <div className="flex flex-wrap gap-2 items-center">
           <label className="text-xs text-[var(--muted)]">
-            Hour (UTC)
+            Hour
             <input
               type="number"
               min={0}
@@ -1217,23 +1320,37 @@ function SettingsPanel({
               className="ml-2 w-16 rounded-lg bg-[var(--ink)]/60 border border-[var(--line)] px-2 py-1"
             />
           </label>
-          <button
-            type="button"
-            className="rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] font-semibold px-4 py-2"
-            onClick={() => {
-              void api
-                .setBriefingSchedule({
-                  enabled: briefEnabled,
-                  hour: briefHour,
-                  minute: briefMinute,
-                })
-                .then(() => onToast('Briefing schedule saved'))
-                .catch((e) => onToast(e.message))
-            }}
-          >
-            Save schedule
-          </button>
         </div>
+        <input
+          value={briefTz}
+          onChange={(e) => setBriefTz(e.target.value)}
+          placeholder="timezone (e.g. Europe/Moscow)"
+          className="w-full rounded-xl bg-[var(--ink)]/60 border border-[var(--line)] px-3 py-2 text-sm"
+        />
+        <input
+          value={briefLocation}
+          onChange={(e) => setBriefLocation(e.target.value)}
+          placeholder="city for weather (e.g. Moscow)"
+          className="w-full rounded-xl bg-[var(--ink)]/60 border border-[var(--line)] px-3 py-2 text-sm"
+        />
+        <button
+          type="button"
+          className="rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] font-semibold px-4 py-2"
+          onClick={() => {
+            void api
+              .setBriefingSchedule({
+                enabled: briefEnabled,
+                hour: briefHour,
+                minute: briefMinute,
+                timezone: briefTz || 'UTC',
+                location: briefLocation,
+              })
+              .then(() => onToast('Briefing schedule saved'))
+              .catch((e) => onToast(e.message))
+          }}
+        >
+          Save schedule
+        </button>
       </div>
 
       <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">

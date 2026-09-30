@@ -75,6 +75,8 @@ class BriefingScheduleBody(BaseModel):
     enabled: bool = True
     hour: int = 8
     minute: int = 0
+    timezone: str = "UTC"
+    location: str = ""
 
 
 class SpeakBody(BaseModel):
@@ -489,11 +491,17 @@ def create_app(
             "briefing": {
                 "ready": True,
                 "schedule": briefing_schedules.get(account.id),
-                "timezone": "UTC",
+                "weather": True,
             },
             "hq_voice": {"ready": bool((account.api_key or settings.openai_api_key or "").strip())},
-            "uploads": {"ready": True},
+            "uploads": {"ready": True, "image_describe": True},
             "backup": {"ready": account.role == "owner"},
+            "setup": {
+                "has_api_key": bool((account.api_key or settings.openai_api_key or "").strip()),
+                "briefing_enabled": bool(briefing_schedules.get(account.id).get("enabled")),
+                "google_connected": bool(google_tokens.status(account.id).get("connected")),
+                "push_configured": bool(push.subs.get(account.id)),
+            },
         }
 
     @app.get("/api/contacts")
@@ -606,6 +614,8 @@ def create_app(
         file: UploadFile = File(...),
         account: Account = Depends(require_account),
     ) -> dict[str, Any]:
+        from core.vision import describe_image
+
         raw = await file.read()
         try:
             meta = uploads.save(
@@ -616,6 +626,28 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        ctype = str(meta.get("content_type") or "")
+        if ctype.startswith("image/") and not meta.get("text_preview"):
+            key = (account.api_key or settings.openai_api_key or "").strip()
+            if key:
+
+                def _desc() -> str | None:
+                    return describe_image(
+                        raw,
+                        content_type=ctype,
+                        api_key=key,
+                        base_url=account.api_base_url
+                        or settings.openai_base_url
+                        or "https://api.openai.com/v1",
+                        model=account.model or settings.openai_model or "gpt-4o-mini",
+                    )
+
+                try:
+                    preview = await asyncio.to_thread(_desc)
+                except Exception:  # noqa: BLE001
+                    preview = None
+                if preview:
+                    meta = uploads.set_text_preview(account.id, str(meta["id"]), preview) or meta
         public = {k: v for k, v in meta.items() if k != "path"}
         return {"file": public}
 
@@ -778,19 +810,25 @@ def create_app(
 
     @app.get("/api/briefing/schedule")
     def get_briefing_schedule_api(account: Account = Depends(require_account)) -> dict[str, Any]:
-        return {"schedule": briefing_schedules.get(account.id), "timezone": "UTC"}
+        cfg = briefing_schedules.get(account.id)
+        return {"schedule": cfg, "timezone": cfg.get("timezone") or "UTC"}
 
     @app.put("/api/briefing/schedule")
     def put_briefing_schedule_api(
         body: BriefingScheduleBody, account: Account = Depends(require_account)
     ) -> dict[str, Any]:
-        cfg = briefing_schedules.set(
-            account.id,
-            enabled=body.enabled,
-            hour=body.hour,
-            minute=body.minute,
-        )
-        return {"schedule": cfg, "timezone": "UTC"}
+        try:
+            cfg = briefing_schedules.set(
+                account.id,
+                enabled=body.enabled,
+                hour=body.hour,
+                minute=body.minute,
+                timezone_name=body.timezone or "UTC",
+                location=body.location or "",
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"schedule": cfg, "timezone": cfg.get("timezone") or "UTC"}
 
     @app.get("/api/chat")
     def get_chat(

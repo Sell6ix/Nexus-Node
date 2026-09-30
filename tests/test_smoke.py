@@ -91,21 +91,48 @@ def test_briefing_schedule(tmp_path: Path) -> None:
     from core.briefing import BriefingScheduleStore, format_briefing_text
 
     store = BriefingScheduleStore(tmp_path / "briefing")
-    store.set("u1", enabled=True, hour=8, minute=0)
+    store.set("u1", enabled=True, hour=8, minute=0, timezone_name="UTC")
     assert store.get("u1")["enabled"] is True
     now = datetime(2026, 3, 15, 8, 5, tzinfo=timezone.utc)
     assert "u1" in store.due_users(now=now)
     store.mark_sent("u1", "2026-03-15")
     assert "u1" not in store.due_users(now=now)
+
+    # Moscow (UTC+3): 08:00 local = 05:00 UTC
+    store.set("u2", enabled=True, hour=8, minute=0, timezone_name="Europe/Moscow", location="Moscow")
+    early = datetime(2026, 3, 15, 4, 59, tzinfo=timezone.utc)
+    assert "u2" not in store.due_users(now=early)
+    local_due = datetime(2026, 3, 15, 5, 1, tzinfo=timezone.utc)
+    assert "u2" in store.due_users(now=local_due)
+    assert store.get("u2")["location"] == "Moscow"
+
     text = format_briefing_text(
         {
             "todos": {"count": 1, "items": [{"title": "Buy milk"}]},
             "local_calendar": {"events": []},
             "reminders": {"count": 0},
             "google": {"connected": False},
+            "weather": {
+                "ok": True,
+                "place": {"name": "Moscow"},
+                "temperature_c": -2,
+                "summary": "overcast",
+                "today_high_c": 0,
+                "today_low_c": -5,
+                "precip_chance_pct": 20,
+            },
         }
     )
     assert "Buy milk" in text
+    assert "Moscow" in text
+    assert "overcast" in text
+
+
+def test_weather_code_label() -> None:
+    from core.weather import _code_label
+
+    assert _code_label(0) == "clear"
+    assert _code_label(61) == "light rain"
 
 
 def test_contacts_store(tmp_path: Path) -> None:

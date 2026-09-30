@@ -104,6 +104,25 @@ class UploadStore:
                 return row
         return None
 
+    def set_text_preview(self, user_id: str, file_id: str, preview: str) -> dict[str, Any] | None:
+        path = self._meta_path(user_id)
+        if not path.is_file():
+            return None
+        try:
+            rows = list(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            return None
+        updated: dict[str, Any] | None = None
+        for row in rows:
+            if isinstance(row, dict) and row.get("id") == file_id:
+                row["text_preview"] = str(preview)[:4000]
+                updated = row
+                break
+        if updated is None:
+            return None
+        self._save_index(user_id, rows)
+        return updated
+
     def read_bytes(self, user_id: str, file_id: str) -> tuple[dict[str, Any], bytes] | None:
         meta = self.get(user_id, file_id)
         if not meta:

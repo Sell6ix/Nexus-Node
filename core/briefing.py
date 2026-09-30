@@ -1,4 +1,4 @@
-"""Shared daily briefing builder + per-user schedule."""
+"""Shared daily briefing builder + per-user schedule (local timezone)."""
 
 from __future__ import annotations
 
@@ -8,15 +8,25 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from core.context import request_context
 from core.google_oauth import GoogleClient, GoogleOAuthError, GoogleTokenStore, google_configured
 from core.secrets import default_box
+from core.weather import weather_for_city
 import tools.calendar_tools as cal
 import tools.daily_tools as daily
 
 
-def build_briefing(user_id: str) -> dict[str, Any]:
+def _tz(name: str | None) -> ZoneInfo:
+    raw = (name or "UTC").strip() or "UTC"
+    try:
+        return ZoneInfo(raw)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
+
+def build_briefing(user_id: str, *, location: str | None = None) -> dict[str, Any]:
     """Collect briefing sections for ``user_id`` (sets request context)."""
     with request_context(user_id=user_id, device_id="hub"):
         sections: dict[str, Any] = {
@@ -60,12 +70,33 @@ def build_briefing(user_id: str) -> dict[str, Any]:
                 except GoogleOAuthError as exc:
                     google["error"] = str(exc)
         sections["google"] = google
+
+        city = (location or "").strip()
+        if city:
+            sections["weather"] = weather_for_city(city)
+        else:
+            sections["weather"] = {"ok": False, "skipped": True}
         return sections
 
 
 def format_briefing_text(sections: dict[str, Any]) -> str:
     """Short plain-text briefing for push / chat."""
     lines = ["Daily briefing"]
+    wx = sections.get("weather") or {}
+    if wx.get("ok"):
+        place = (wx.get("place") or {}).get("name") or "there"
+        temp = wx.get("temperature_c")
+        summary = wx.get("summary") or ""
+        hi = wx.get("today_high_c")
+        lo = wx.get("today_low_c")
+        rain = wx.get("precip_chance_pct")
+        bit = f"Weather in {place}: {temp}°C, {summary}"
+        if hi is not None and lo is not None:
+            bit += f" (high {hi}° / low {lo}°)"
+        if rain is not None:
+            bit += f", rain {rain}%"
+        lines.append(bit)
+
     todos = sections.get("todos") or {}
     if todos.get("count"):
         lines.append(f"Todos ({todos['count']}):")
@@ -101,7 +132,7 @@ def format_briefing_text(sections: dict[str, Any]) -> str:
 
 
 class BriefingScheduleStore:
-    """``data/briefing/<user>.json`` — hour:minute UTC + enabled."""
+    """``data/briefing/<user>.json`` — local hour:minute + IANA timezone."""
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
@@ -114,15 +145,34 @@ class BriefingScheduleStore:
     def get(self, user_id: str) -> dict[str, Any]:
         path = self._path(user_id)
         if not path.is_file():
-            return {"enabled": False, "hour": 8, "minute": 0, "last_sent_day": None}
+            return {
+                "enabled": False,
+                "hour": 8,
+                "minute": 0,
+                "timezone": "UTC",
+                "location": "",
+                "last_sent_day": None,
+            }
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return {"enabled": False, "hour": 8, "minute": 0, "last_sent_day": None}
+            return {
+                "enabled": False,
+                "hour": 8,
+                "minute": 0,
+                "timezone": "UTC",
+                "location": "",
+                "last_sent_day": None,
+            }
+        tz_name = str(raw.get("timezone") or "UTC").strip() or "UTC"
+        # Validate timezone early
+        _ = _tz(tz_name)
         return {
             "enabled": bool(raw.get("enabled")),
             "hour": int(raw.get("hour") if raw.get("hour") is not None else 8),
             "minute": int(raw.get("minute") if raw.get("minute") is not None else 0),
+            "timezone": tz_name,
+            "location": str(raw.get("location") or "").strip(),
             "last_sent_day": raw.get("last_sent_day"),
         }
 
@@ -133,13 +183,26 @@ class BriefingScheduleStore:
         enabled: bool,
         hour: int = 8,
         minute: int = 0,
+        timezone_name: str | None = None,
+        location: str | None = None,
     ) -> dict[str, Any]:
         cur = self.get(user_id)
+        tz_name = (timezone_name if timezone_name is not None else cur.get("timezone")) or "UTC"
+        tz_name = str(tz_name).strip() or "UTC"
+        try:
+            ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Unknown timezone '{tz_name}'") from exc
+        loc = cur.get("location") or ""
+        if location is not None:
+            loc = str(location).strip()
         cur.update(
             {
                 "enabled": bool(enabled),
                 "hour": max(0, min(23, int(hour))),
                 "minute": max(0, min(59, int(minute))),
+                "timezone": tz_name,
+                "location": loc,
             }
         )
         self._path(user_id).write_text(json.dumps(cur, indent=2) + "\n", encoding="utf-8")
@@ -151,17 +214,20 @@ class BriefingScheduleStore:
         self._path(user_id).write_text(json.dumps(cur, indent=2) + "\n", encoding="utf-8")
 
     def due_users(self, *, now: datetime | None = None) -> list[str]:
-        base = now or datetime.now(timezone.utc)
-        day = base.date().isoformat()
+        base_utc = now or datetime.now(timezone.utc)
+        if base_utc.tzinfo is None:
+            base_utc = base_utc.replace(tzinfo=timezone.utc)
         out: list[str] = []
         for path in self.root.glob("*.json"):
             uid = path.stem
             cfg = self.get(uid)
             if not cfg.get("enabled"):
                 continue
+            local = base_utc.astimezone(_tz(str(cfg.get("timezone") or "UTC")))
+            day = local.date().isoformat()
             if cfg.get("last_sent_day") == day:
                 continue
-            if (base.hour, base.minute) >= (int(cfg["hour"]), int(cfg["minute"])):
+            if (local.hour, local.minute) >= (int(cfg["hour"]), int(cfg["minute"])):
                 out.append(uid)
         return out
 
@@ -197,10 +263,13 @@ class BriefingNotifier:
 
     def tick_once(self) -> int:
         sent = 0
-        day = datetime.now(timezone.utc).date().isoformat()
-        for uid in self.store.due_users():
+        base_utc = datetime.now(timezone.utc)
+        for uid in self.store.due_users(now=base_utc):
             try:
-                sections = build_briefing(uid)
+                cfg = self.store.get(uid)
+                local = base_utc.astimezone(_tz(str(cfg.get("timezone") or "UTC")))
+                day = local.date().isoformat()
+                sections = build_briefing(uid, location=str(cfg.get("location") or "") or None)
                 text = format_briefing_text(sections)
                 ok = self.send(uid, text)
                 if ok is False:
