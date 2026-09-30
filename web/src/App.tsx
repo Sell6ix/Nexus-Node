@@ -151,6 +151,21 @@ export default function App() {
   }, [voicePrefs])
 
   useEffect(() => {
+    if (!toast) return
+    const t = window.setTimeout(() => setToast(''), 3500)
+    return () => window.clearTimeout(t)
+  }, [toast])
+
+  function refreshSetup() {
+    void api
+      .assistant()
+      .then((a) => {
+        if (a.setup) setSetup(a.setup)
+      })
+      .catch(() => undefined)
+  }
+
+  useEffect(() => {
     if (boot !== 'app') return
     void registerServiceWorker()
     void api
@@ -850,7 +865,14 @@ export default function App() {
       )}
 
       {tab === 'devices' && <DevicesPanel user={user} onUser={setUser} onToast={setToast} />}
-      {tab === 'settings' && <SettingsPanel user={user} onUser={setUser} onToast={setToast} />}
+      {tab === 'settings' && (
+        <SettingsPanel
+          user={user}
+          onUser={setUser}
+          onToast={setToast}
+          onSetupChange={refreshSetup}
+        />
+      )}
 
       {confirm && (
         <div className="fixed inset-0 z-50 bg-black/65 backdrop-blur-sm grid place-items-end sm:place-items-center p-4">
@@ -1170,10 +1192,12 @@ function SettingsPanel({
   user,
   onUser,
   onToast,
+  onSetupChange,
 }: {
   user: User
   onUser: (u: User) => void
   onToast: (t: string) => void
+  onSetupChange?: () => void
 }) {
   const [apiKey, setApiKey] = useState('')
   const [model, setModel] = useState(user.model || '')
@@ -1308,6 +1332,7 @@ function SettingsPanel({
                   onUser(r.user)
                   setApiKey('')
                   onToast('Saved')
+                  onSetupChange?.()
                 })
                 .catch((e) => onToast(e.message))
             }}
@@ -1440,7 +1465,10 @@ function SettingsPanel({
                 evening_hour: eveHour,
                 evening_minute: eveMinute,
               })
-              .then(() => onToast('Briefing schedule saved'))
+              .then(() => {
+                onToast('Briefing schedule saved')
+                onSetupChange?.()
+              })
               .catch((e) => onToast(e.message))
           }}
         >
@@ -1476,7 +1504,10 @@ function SettingsPanel({
               void api
                 .googleDisconnect()
                 .then(() => reloadGoogle())
-                .then(() => onToast('Google disconnected'))
+                .then(() => {
+                  onToast('Google disconnected')
+                  onSetupChange?.()
+                })
                 .catch((e) => onToast(e.message))
             }}
           >
@@ -1600,6 +1631,7 @@ function SettingsPanel({
               .then((msg) => {
                 setPushNote(msg)
                 onToast(msg)
+                onSetupChange?.()
               })
               .catch((e) => onToast(e instanceof Error ? e.message : 'Push failed'))
           }}
