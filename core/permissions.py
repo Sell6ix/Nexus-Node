@@ -38,6 +38,7 @@ DEFAULT_FRIEND_ALLOW_TOOLS: frozenset[str] = frozenset(
         "fetch_url",
         "list_contacts",
         "add_contact",
+        "remove_contact",
     }
 )
 
@@ -51,7 +52,6 @@ DEFAULT_FRIEND_DENY_TOOLS: frozenset[str] = frozenset(
         "send_telegram_backup",
         "send_email",
         "send_telegram_message",
-        "remove_contact",
     }
 )
 
