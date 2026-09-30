@@ -24,6 +24,9 @@ Phone or PC browser (PWA)
 - Personal memory, diary (dated journal), and a local hub calendar
 - HQ voice: Whisper STT + OpenAI TTS (toggle off for browser speech)
 - Google Gmail/Calendar OAuth; morning + evening briefing (`Asia/Jerusalem` + Tel Aviv weather)
+- `whats_next` / `plan_route` — next event, leave-by ETA, Google/Apple Maps links
+- `set_alarm` — wake-up reminders (local Israel time) with spoken alert
+- Share to Nexus → auto-summarize; `summarize_url` for links/YouTube page text
 - `sync_calendars` pull/push between hub calendar and Google
 - Image attach → vision describe/OCR when an AI key is set; first-run setup checklist
 - App-open / daily reminders, chat file attach, owner backup zip

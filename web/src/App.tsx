@@ -249,9 +249,12 @@ export default function App() {
     if (shareTitle || shareText || shareUrl) {
       deepLinkDone.current = true
       const bits = [shareTitle, shareText, shareUrl].filter(Boolean)
-      setInput(bits.join('\n'))
+      const shared = bits.join('\n')
       setTab('chat')
       history.replaceState({}, '', location.pathname)
+      void sendMessage(
+        `Summarize this shared content for me in ~5 short bullets:\n\n${shared}`,
+      )
       return
     }
     if (tabQ) {
@@ -276,8 +279,19 @@ export default function App() {
           if (data.type === 'confirm') {
             setConfirm({ id: data.id, prompt: data.prompt, timeout: data.timeout || 120 })
           }
-          if (data.type === 'reminder' || data.type === 'briefing') {
-            setToast(data.text || (data.type === 'briefing' ? 'Briefing' : 'Reminder'))
+          if (
+            data.type === 'reminder' ||
+            data.type === 'briefing' ||
+            data.type === 'alarm'
+          ) {
+            setToast(
+              data.text ||
+                (data.type === 'briefing'
+                  ? 'Briefing'
+                  : data.type === 'alarm'
+                    ? 'Alarm'
+                    : 'Reminder'),
+            )
             const nav = navigator as Navigator & {
               setAppBadge?: (n?: number) => Promise<void>
             }
@@ -288,12 +302,17 @@ export default function App() {
             showLocalNotification(
               data.type === 'briefing'
                 ? data.title || 'Briefing'
-                : 'Nexus Node',
+                : data.type === 'alarm'
+                  ? data.title || 'Alarm'
+                  : 'Nexus Node',
               data.text,
             )
             const prefs = loadVoicePrefs()
-            if (prefs.replies && data.text) {
-              if (prefs.hq) {
+            const shouldSpeak =
+              Boolean(data.text) &&
+              (data.type === 'alarm' || data.speak || prefs.replies)
+            if (shouldSpeak && data.text) {
+              if (prefs.hq || data.type === 'alarm') {
                 void api
                   .speak(String(data.text), prefs.lang)
                   .then((blob) => speakHqBlob(blob, String(data.text), prefs.lang))
@@ -1364,7 +1383,7 @@ function SettingsPanel({
         </p>
         <p className="text-xs text-[var(--text)]">{assistantNote || 'Loading…'}</p>
         <p className="text-xs text-[var(--muted)]">
-          Try: «включи брифинг в 8 по Тель-Авиву» · «что в почте» · «напиши Маше в WhatsApp…»
+          Try: «что дальше?» · «будильник на 7:30» · «маршрут до …» · Share → summary
         </p>
       </div>
 

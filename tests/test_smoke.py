@@ -155,6 +155,41 @@ def test_weather_code_label() -> None:
     assert _code_label(61) == "light rain"
 
 
+def test_parse_when_jerusalem() -> None:
+    from datetime import datetime, timezone
+
+    from core.reminders import parse_when
+
+    now = datetime(2026, 1, 15, 10, 0, tzinfo=timezone.utc)  # Israel winter UTC+2
+    due = parse_when("12:00", now=now)
+    assert due is not None
+    assert due.hour == 10  # 12:00 IST → 10:00 UTC
+
+
+def test_maps_links() -> None:
+    from core.routing import maps_links
+
+    links = maps_links(origin="Tel Aviv", destination="Haifa", mode="driving")
+    assert "google.com/maps" in links["google_maps"]
+    assert "Haifa" in links["google_maps"]
+    assert "maps.apple.com" in links["apple_maps"]
+
+
+def test_set_alarm(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from core.context import request_context
+    import tools.daily_tools as daily
+
+    daily._ROOT = tmp_path  # type: ignore[attr-defined]
+    with request_context(user_id="u-alarm"):
+        due = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        res = daily.set_alarm(due, label="Wake up")
+    assert res["ok"]
+    assert res["alarm"]["kind"] == "alarm"
+    assert "Wake up" in res["alarm"]["text"]
+
+
 def test_contacts_store(tmp_path: Path) -> None:
     store = ContactStore(tmp_path / "contacts")
     c = store.upsert(

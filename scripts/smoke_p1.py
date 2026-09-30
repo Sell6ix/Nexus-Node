@@ -22,7 +22,9 @@ def test_parse_when() -> None:
     now = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
     assert parse_when("in 10 minutes", now=now) == now + timedelta(minutes=10)
     assert parse_when("in 2 hours", now=now) == now + timedelta(hours=2)
-    assert parse_when("2026-09-30 09:30", now=now).hour == 9  # type: ignore[union-attr]
+    # Naive clock times are Asia/Jerusalem (IDT in late Sep → UTC+3)
+    local_nine = parse_when("2026-09-30 09:30", now=now)
+    assert local_nine is not None and local_nine.hour == 6
     assert parse_when("tomorrow 08:00", now=now).day == 30  # type: ignore[union-attr]
     assert parse_when("not a time", now=now) is None
     print("OK parse_when")

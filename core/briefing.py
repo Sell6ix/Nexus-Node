@@ -78,6 +78,25 @@ def build_briefing(user_id: str, *, location: str | None = None) -> dict[str, An
             sections["weather"] = weather_for_city(city)
         else:
             sections["weather"] = {"ok": False, "skipped": True}
+        try:
+            import tools.travel_tools as travel
+
+            nxt = travel.whats_next(buffer_minutes=10)
+            if nxt.get("ok"):
+                sections["whats_next"] = {
+                    "next": nxt.get("next"),
+                    "leave_by_utc": nxt.get("leave_by_utc"),
+                    "travel_minutes": nxt.get("travel_minutes"),
+                    "route": {
+                        "ok": (nxt.get("route") or {}).get("ok"),
+                        "eta": (nxt.get("route") or {}).get("eta"),
+                        "links": (nxt.get("route") or {}).get("links"),
+                    }
+                    if nxt.get("route")
+                    else None,
+                }
+        except Exception as exc:  # noqa: BLE001
+            sections["whats_next"] = {"ok": False, "error": str(exc)}
         return sections
 
 
@@ -132,6 +151,15 @@ def format_briefing_text(sections: dict[str, Any], *, slot: Slot = "morning") ->
     rems = sections.get("reminders") or {}
     if rems.get("count"):
         lines.append(f"Reminders open: {rems['count']}")
+
+    nxt = (sections.get("whats_next") or {}).get("next") or {}
+    if nxt.get("title"):
+        leave = (sections.get("whats_next") or {}).get("leave_by_utc")
+        bit = f"Next: {nxt.get('title')} at {nxt.get('start') or nxt.get('start_utc')}"
+        if leave:
+            bit += f" — leave by {leave}"
+        lines.append(bit)
+
     if slot == "evening":
         lines.append("Wind down — pick one thing for tomorrow if you want.")
     return "\n".join(lines)

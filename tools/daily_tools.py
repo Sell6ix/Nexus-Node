@@ -227,6 +227,7 @@ def set_reminder(
             "due_at": due.isoformat() if due else None,
             "deliver": mode,
             "recur": recur_s or None,
+            "kind": "reminder",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "done": False,
             "notified_at": None,
@@ -266,6 +267,58 @@ def list_reminders(include_done: bool = False) -> dict[str, Any]:
             "user_id": get_user_id(),
             "count": len(rows),
             "reminders": rows[-100:],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
+@tool
+def set_alarm(when: str, label: str = "Alarm") -> dict[str, Any]:
+    """Set a wake-up / alarm-style reminder (local Israel time by default).
+
+    Fires as a push + in-app alert and asks the phone to speak the label.
+    Not a native OS alarm clock — keep the hub online and notifications on.
+
+    Args:
+        when: ``07:30``, ``tomorrow 07:00``, ``in 25 minutes``, or ISO.
+        label: What to say when it rings (default ``Alarm``).
+
+    Returns:
+        Stored alarm reminder.
+    """
+    try:
+        text = (label or "Alarm").strip() or "Alarm"
+        when_raw = when.strip()
+        due = parse_when(when_raw)
+        if due is None:
+            return {
+                "ok": False,
+                "error": "Could not parse when. Try '07:30', 'tomorrow 07:00', or 'in 25 minutes'.",
+            }
+        rows = _load(_reminders_path())
+        item: dict[str, Any] = {
+            "id": uuid.uuid4().hex[:10],
+            "text": text,
+            "when": when_raw,
+            "due_at": due.isoformat(),
+            "deliver": "time",
+            "recur": None,
+            "kind": "alarm",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "done": False,
+            "notified_at": None,
+            "user_id": get_user_id(),
+        }
+        rows.append(item)
+        _save(_reminders_path(), rows[-500:])
+        return {
+            "ok": True,
+            "alarm": item,
+            "note": (
+                f"Alarm set for {due.isoformat()} (Asia/Jerusalem local times). "
+                "Hub must stay online; enable notifications. "
+                "For a hard OS alarm, also set the phone Clock app."
+            ),
         }
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}

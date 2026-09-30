@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 _RELATIVE_RE = re.compile(
@@ -20,25 +21,46 @@ _DATE_TIME_RE = re.compile(
     r"^\s*(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?\s*$"
 )
 
+DEFAULT_WHEN_TZ = "Asia/Jerusalem"
 
-def parse_when(when: str, *, now: datetime | None = None) -> datetime | None:
-    """Parse a due time into an aware UTC datetime, or None if unparsable."""
+
+def _local_tz(name: str | None = None) -> ZoneInfo:
+    raw = (name or DEFAULT_WHEN_TZ).strip() or DEFAULT_WHEN_TZ
+    try:
+        return ZoneInfo(raw)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
+
+def parse_when(
+    when: str,
+    *,
+    now: datetime | None = None,
+    timezone_name: str | None = DEFAULT_WHEN_TZ,
+) -> datetime | None:
+    """Parse a due time into an aware UTC datetime, or None if unparsable.
+
+    Bare times / naive datetimes are interpreted in ``timezone_name``
+    (default Asia/Jerusalem), then converted to UTC.
+    """
     text = (when or "").strip()
     if not text:
         return None
     base = now or datetime.now(timezone.utc)
     if base.tzinfo is None:
         base = base.replace(tzinfo=timezone.utc)
+    local_tz = _local_tz(timezone_name)
+    base_local = base.astimezone(local_tz)
 
-    # ISO / fromisoformat (handle trailing Z)
-    iso = text.replace("Z", "+00:00")
-    try:
-        dt = datetime.fromisoformat(iso)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except ValueError:
-        pass
+    # ISO with explicit offset / Z
+    if text.endswith("Z") or re.search(r"[+-]\d{2}:\d{2}$", text):
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except ValueError:
+            pass
 
     m = _RELATIVE_RE.match(text)
     if m:
@@ -56,35 +78,41 @@ def parse_when(when: str, *, now: datetime | None = None) -> datetime | None:
         hour = int(m.group(4) or 9)
         minute = int(m.group(5) or 0)
         second = int(m.group(6) or 0)
-        return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+        local_dt = datetime(year, month, day, hour, minute, second, tzinfo=local_tz)
+        return local_dt.astimezone(timezone.utc)
+
+    # Naive ISO (e.g. 2026-09-30T09:30:00) → local
+    try:
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=local_tz)
+        return dt.astimezone(timezone.utc)
+    except ValueError:
+        pass
 
     m = _TIME_ONLY_RE.match(text)
     if m:
         hour, minute = int(m.group(1)), int(m.group(2))
         if not (0 <= hour <= 23 and 0 <= minute <= 59):
             return None
-        candidate = base.astimezone(timezone.utc).replace(
-            hour=hour, minute=minute, second=0, microsecond=0
-        )
-        if candidate <= base:
+        candidate = base_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= base_local:
             candidate += timedelta(days=1)
-        return candidate
+        return candidate.astimezone(timezone.utc)
 
     # "tomorrow HH:MM" / "tomorrow"
     low = text.lower()
     if low.startswith("tomorrow"):
         rest = text[len("tomorrow") :].strip()
-        day = (base + timedelta(days=1)).astimezone(timezone.utc)
+        day = (base_local + timedelta(days=1)).replace(second=0, microsecond=0)
         if not rest:
-            return day.replace(hour=9, minute=0, second=0, microsecond=0)
+            return day.replace(hour=9, minute=0).astimezone(timezone.utc)
         tm = _TIME_ONLY_RE.match(rest)
         if tm:
             return day.replace(
                 hour=int(tm.group(1)),
                 minute=int(tm.group(2)),
-                second=0,
-                microsecond=0,
-            )
+            ).astimezone(timezone.utc)
 
     return None
 
@@ -256,7 +284,9 @@ class ReminderNotifier:
                 continue
             text = str(item.get("text") or "(reminder)")
             when = item.get("when") or item.get("due_at") or ""
-            body = f"⏰ Reminder\n{text}"
+            kind = str(item.get("kind") or "reminder").lower()
+            title = "Alarm" if kind == "alarm" else "Reminder"
+            body = f"⏰ {title}\n{text}"
             if when:
                 body += f"\n(when: {when})"
             try:

@@ -285,3 +285,61 @@ def fetch_url(url: str, max_chars: int = 8000) -> dict[str, Any]:
         return {"ok": False, "error": f"HTTP {exc.code}", "url": url}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc), "url": url}
+
+
+@tool
+def summarize_url(url: str = "", text: str = "") -> dict[str, Any]:
+    """Fetch a shared link (or use pasted text) and return material to summarize.
+
+    Use after PWA Share Target or when the user pastes a YouTube / article URL.
+    YouTube: page metadata only (no full transcript without extra APIs).
+
+    Args:
+        url: Optional http(s) URL.
+        text: Optional pasted body / share text.
+
+    Returns:
+        Title + excerpt the assistant should turn into ~5 short bullets.
+    """
+    try:
+        url_s = (url or "").strip()
+        body = (text or "").strip()
+        # Pull first URL out of free text if needed
+        if not url_s and body:
+            m = re.search(r"https?://\S+", body)
+            if m:
+                url_s = m.group(0).rstrip(").,]\"'")
+        parts: list[str] = []
+        title = None
+        final_url = url_s or None
+        if url_s:
+            fetched = fetch_url(url_s, max_chars=10_000)
+            if fetched.get("ok"):
+                title = fetched.get("title")
+                final_url = fetched.get("url") or url_s
+                parts.append(str(fetched.get("text") or ""))
+            else:
+                parts.append(f"(fetch failed: {fetched.get('error')})")
+        if body:
+            # Drop duplicate URL line
+            cleaned = body
+            if url_s:
+                cleaned = cleaned.replace(url_s, "").strip()
+            if cleaned:
+                parts.insert(0, cleaned)
+        blob = "\n\n".join(p for p in parts if p).strip()
+        if not blob:
+            return {"ok": False, "error": "Need a URL or some text to summarize."}
+        return {
+            "ok": True,
+            "url": final_url,
+            "title": title,
+            "chars": len(blob),
+            "text": blob[:12_000],
+            "hint": (
+                "Summarize for the user in 5 short bullets (phone-friendly). "
+                "If YouTube, note this is title/description only, not a full transcript."
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}

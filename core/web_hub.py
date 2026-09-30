@@ -984,14 +984,25 @@ def create_app(
 
     # Reminder / briefing pings → in-app via audit + optional WS notify
     def _send_reminder(user_id: str, text: str) -> bool:
-        live = broker.notify(user_id, {"type": "reminder", "text": text})
-        pushed = push.send(user_id, "Nexus Node", text)
+        is_alarm = str(text).startswith("⏰ Alarm")
+        kind = "alarm" if is_alarm else "reminder"
+        live = broker.notify(
+            user_id,
+            {
+                "type": kind,
+                "text": text,
+                "speak": is_alarm,
+                "title": "Alarm" if is_alarm else "Reminder",
+            },
+        )
+        pushed = push.send(user_id, "Alarm" if is_alarm else "Nexus Node", text)
         if live or pushed:
             chats.append(user_id, "system", text, "main")
             audit.log(
                 "reminder_delivered",
                 user_id=user_id,
                 text=text[:120],
+                kind=kind,
                 ws=live,
                 push=pushed,
             )
