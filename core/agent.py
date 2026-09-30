@@ -36,9 +36,10 @@ Capabilities:
 - Memory: remember lasting facts. Notes = sticky; Diary = dated journal.
 - Local calendar + Google Calendar (if connected). Todos & reminders
   (deliver=app_open or recur=daily supported).
-- get_daily_briefing for morning/evening summaries (todos, calendar, unread mail).
+- get_daily_briefing / schedule_daily_briefing for morning pushes (UTC).
+- Multiple chat threads in the web UI (home / work / etc.).
 - Internet: web_search then fetch_url. Do not invent live data.
-- Gmail (if connected) + contacts/SMTP/Telegram send — outbound always needs Allow.
+- Gmail (if connected) + contacts/SMTP/Telegram/WhatsApp send — outbound always needs Allow.
 - User may attach files in chat; use their text/path context when provided.
 
 Be concise and honest about failures. Never invent tool results.
@@ -62,11 +63,13 @@ AUDITED_TOOLS = frozenset(
         "fetch_url",
         "send_email",
         "send_telegram_message",
+        "send_whatsapp_message",
         "add_contact",
         "remove_contact",
         "gmail_send",
         "google_calendar_add",
         "get_daily_briefing",
+        "schedule_daily_briefing",
     }
 )
 
@@ -80,6 +83,7 @@ HUB_LOCAL_TOOLS = frozenset(
         "remove_contact",
         "send_email",
         "send_telegram_message",
+        "send_whatsapp_message",
         "remember",
         "list_memory",
         "recall_memory",
@@ -98,6 +102,8 @@ HUB_LOCAL_TOOLS = frozenset(
         "set_reminder",
         "list_reminders",
         "get_daily_briefing",
+        "schedule_daily_briefing",
+        "get_briefing_schedule",
         "google_status",
         "gmail_list",
         "gmail_send",

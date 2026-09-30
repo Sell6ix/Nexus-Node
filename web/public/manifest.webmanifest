@@ -14,5 +14,28 @@
       "type": "image/svg+xml",
       "purpose": "any maskable"
     }
+  ],
+  "shortcuts": [
+    {
+      "name": "Open chat",
+      "short_name": "Chat",
+      "description": "Jump into your last conversation",
+      "url": "/?tab=chat",
+      "icons": [{ "src": "/favicon.svg", "sizes": "any" }]
+    },
+    {
+      "name": "Voice",
+      "short_name": "Voice",
+      "description": "Start talking to Nexus",
+      "url": "/?tab=chat&voice=1",
+      "icons": [{ "src": "/favicon.svg", "sizes": "any" }]
+    },
+    {
+      "name": "Daily briefing",
+      "short_name": "Briefing",
+      "description": "Ask for today's briefing",
+      "url": "/?tab=chat&briefing=1",
+      "icons": [{ "src": "/favicon.svg", "sizes": "any" }]
+    }
   ]
 }

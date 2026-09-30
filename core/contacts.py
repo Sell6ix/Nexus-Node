@@ -51,7 +51,11 @@ class ContactStore:
             name = str(c.get("name") or "").strip().lower()
             email = str(c.get("email") or "").strip().lower()
             tg = str(c.get("telegram") or "").strip().lower()
+            wa = re.sub(r"\D", "", str(c.get("whatsapp") or ""))
+            q_digits = re.sub(r"\D", "", q)
             if q in {name, email, tg} or q == str(c.get("id") or "").lower():
+                return c
+            if q_digits and wa and q_digits == wa:
                 return c
         # partial name match if unique
         hits = [
@@ -68,6 +72,7 @@ class ContactStore:
         name: str,
         email: str = "",
         telegram: str = "",
+        whatsapp: str = "",
         notes: str = "",
         contact_id: str | None = None,
     ) -> dict[str, Any]:
@@ -76,8 +81,12 @@ class ContactStore:
             raise ValueError("name is required")
         email_s = email.strip()
         telegram_s = telegram.strip().lstrip("@")
-        if not email_s and not telegram_s:
-            raise ValueError("Provide at least an email or telegram chat id/username")
+        whatsapp_s = re.sub(r"[^\d+]", "", whatsapp.strip())
+        if whatsapp_s.startswith("+"):
+            whatsapp_s = whatsapp_s[1:]
+        whatsapp_s = re.sub(r"\D", "", whatsapp_s)
+        if not email_s and not telegram_s and not whatsapp_s:
+            raise ValueError("Provide at least an email, telegram, or whatsapp number")
         rows = self.list(user_id)
         existing = None
         if contact_id:
@@ -93,6 +102,7 @@ class ContactStore:
                 "name": name_s,
                 "email": email_s or None,
                 "telegram": telegram_s or None,
+                "whatsapp": whatsapp_s or None,
                 "notes": notes.strip() or None,
                 "created_at": time.time(),
             }
@@ -103,6 +113,8 @@ class ContactStore:
                 existing["email"] = email_s
             if telegram_s:
                 existing["telegram"] = telegram_s
+            if whatsapp_s:
+                existing["whatsapp"] = whatsapp_s
             if notes.strip():
                 existing["notes"] = notes.strip()
             existing["updated_at"] = time.time()

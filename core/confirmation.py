@@ -219,6 +219,10 @@ def confirmation_message_for(
         to = str(arguments.get("to") or "?").strip()
         preview = str(arguments.get("text") or "")[:120]
         return f"Send Telegram message to {to!r}?\nPreview: {preview}"
+    if name == "send_whatsapp_message":
+        to = str(arguments.get("to") or "?").strip()
+        preview = str(arguments.get("text") or "")[:120]
+        return f"Send WhatsApp message to {to!r}?\nPreview: {preview}"
     if name == "gmail_send":
         to = str(arguments.get("to") or "?").strip()
         subject = str(arguments.get("subject") or "(no subject)").strip()

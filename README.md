@@ -19,11 +19,13 @@ Phone or PC browser (PWA)
 - **Hub** (`--mode web`) — accounts, chat UI, agent, confirmations, reminders  
 - **Worker** (`--mode worker`) — extra PC that exposes tools to the hub  
 - First registered user is **owner**; others join with an **invite code** (or open signup)
-- Chat history is saved per account on the hub (`data/chats/`) and restores after reload
-- Web search + page fetch; contacts with confirmed email / Telegram send
+- Multiple chat threads per account (`data/chats/<user>/…`) — home / work / etc.
+- Web search + page fetch; contacts with confirmed email / Telegram / WhatsApp Cloud send
 - Personal memory, diary (dated journal), and a local hub calendar
-- Voice chat: mic button (browser speech or Whisper), optional spoken replies
-- Google Gmail/Calendar OAuth, daily briefing, app-open/daily reminders, chat file attach, owner backup zip
+- HQ voice: Whisper STT + OpenAI TTS (toggle off for browser speech)
+- Google Gmail/Calendar OAuth; on-demand + **scheduled** daily briefing (UTC push)
+- App-open / daily reminders, chat file attach, owner backup zip
+- PWA home-screen shortcuts: Chat, Voice, Briefing
 
 ## Quick start
 

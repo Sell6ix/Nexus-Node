@@ -71,12 +71,56 @@ def test_chat_history_persist(tmp_path: Path) -> None:
     assert store.load("u1") == []
 
 
+def test_chat_conversations(tmp_path: Path) -> None:
+    store = ChatHistory(tmp_path / "chats", max_messages=50)
+    store.append("u1", "user", "general", "main")
+    work = store.create_conversation("u1", "Work")
+    store.append("u1", "user", "standup notes", work["id"])
+    assert store.load("u1", "main")[0]["text"] == "general"
+    assert store.load("u1", work["id"])[0]["text"] == "standup notes"
+    titles = {c["title"] for c in store.list_conversations("u1")}
+    assert "Work" in titles
+    assert store.rename_conversation("u1", work["id"], "Office")["title"] == "Office"
+    assert store.delete_conversation("u1", work["id"])
+    assert work["id"] not in {c["id"] for c in store.list_conversations("u1")}
+
+
+def test_briefing_schedule(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    from core.briefing import BriefingScheduleStore, format_briefing_text
+
+    store = BriefingScheduleStore(tmp_path / "briefing")
+    store.set("u1", enabled=True, hour=8, minute=0)
+    assert store.get("u1")["enabled"] is True
+    now = datetime(2026, 3, 15, 8, 5, tzinfo=timezone.utc)
+    assert "u1" in store.due_users(now=now)
+    store.mark_sent("u1", "2026-03-15")
+    assert "u1" not in store.due_users(now=now)
+    text = format_briefing_text(
+        {
+            "todos": {"count": 1, "items": [{"title": "Buy milk"}]},
+            "local_calendar": {"events": []},
+            "reminders": {"count": 0},
+            "google": {"connected": False},
+        }
+    )
+    assert "Buy milk" in text
+
+
 def test_contacts_store(tmp_path: Path) -> None:
     store = ContactStore(tmp_path / "contacts")
-    c = store.upsert("u1", name="Masha", email="masha@example.com", telegram="@masha")
+    c = store.upsert(
+        "u1",
+        name="Masha",
+        email="masha@example.com",
+        telegram="@masha",
+        whatsapp="79001234567",
+    )
     assert c["id"]
     assert store.find("u1", "masha")["email"] == "masha@example.com"
     assert store.find("u1", "masha@example.com") is not None
+    assert store.find("u1", "79001234567")["whatsapp"] == "79001234567"
     assert store.remove("u1", c["id"])
     assert store.list("u1") == []
 

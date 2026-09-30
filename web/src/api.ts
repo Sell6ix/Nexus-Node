@@ -59,16 +59,67 @@ export const api = {
   addDevice: (body: { id: string; name: string; base_url: string; token: string }) =>
     request<{ ok: boolean }>('/api/devices', { method: 'POST', body: JSON.stringify(body) }),
   deleteDevice: (id: string) => request<{ ok: boolean }>(`/api/devices/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  getChat: () =>
-    request<{ messages: { role: 'user' | 'assistant' | 'system'; text: string; ts?: number }[] }>(
-      '/api/chat',
-    ),
-  clearChat: () => request<{ ok: boolean }>('/api/chat', { method: 'DELETE' }),
-  chat: (message: string, attachmentIds: string[] = []) =>
-    request<{ reply: string }>('/api/chat', {
+  listConversations: () =>
+    request<{
+      conversations: { id: string; title: string; created_at?: number; updated_at?: number }[]
+    }>('/api/conversations'),
+  createConversation: (title = 'New chat') =>
+    request<{ conversation: { id: string; title: string } }>('/api/conversations', {
       method: 'POST',
-      body: JSON.stringify({ message, attachment_ids: attachmentIds }),
+      body: JSON.stringify({ title }),
     }),
+  renameConversation: (id: string, title: string) =>
+    request<{ conversation: { id: string; title: string } }>(
+      `/api/conversations/${encodeURIComponent(id)}`,
+      { method: 'PATCH', body: JSON.stringify({ title }) },
+    ),
+  deleteConversation: (id: string) =>
+    request<{ ok: boolean }>(`/api/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  getChat: (conversationId = 'main') =>
+    request<{
+      conversation_id: string
+      messages: { role: 'user' | 'assistant' | 'system'; text: string; ts?: number }[]
+    }>(`/api/chat?conversation_id=${encodeURIComponent(conversationId)}`),
+  clearChat: (conversationId = 'main') =>
+    request<{ ok: boolean }>(
+      `/api/chat?conversation_id=${encodeURIComponent(conversationId)}`,
+      { method: 'DELETE' },
+    ),
+  chat: (message: string, attachmentIds: string[] = [], conversationId = 'main') =>
+    request<{ reply: string; conversation_id: string }>('/api/chat', {
+      method: 'POST',
+      body: JSON.stringify({
+        message,
+        attachment_ids: attachmentIds,
+        conversation_id: conversationId,
+      }),
+    }),
+  getBriefingSchedule: () =>
+    request<{
+      schedule: { enabled: boolean; hour: number; minute: number; last_sent_day?: string | null }
+      timezone: string
+    }>('/api/briefing/schedule'),
+  setBriefingSchedule: (body: { enabled: boolean; hour: number; minute: number }) =>
+    request<{
+      schedule: { enabled: boolean; hour: number; minute: number }
+      timezone: string
+    }>('/api/briefing/schedule', { method: 'PUT', body: JSON.stringify(body) }),
+  speak: async (text: string, language = '') => {
+    const token = getToken()
+    const res = await fetch('/api/voice/speak', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ text, language }),
+    })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error((data as { detail?: string }).detail || res.statusText)
+    }
+    return res.blob()
+  },
   upload: (file: File) => {
     const fd = new FormData()
     fd.append('file', file)
@@ -110,7 +161,10 @@ export const api = {
       fetch_url: { ready: boolean }
       email: { ready: boolean; from: string | null }
       telegram_messaging: { ready: boolean }
+      whatsapp_messaging: { ready: boolean }
       contacts: { ready: boolean }
+      briefing: { ready: boolean; schedule?: { enabled: boolean; hour: number; minute: number } }
+      hq_voice: { ready: boolean }
     }>('/api/assistant'),
   contacts: () =>
     request<{
@@ -119,6 +173,7 @@ export const api = {
         name: string
         email?: string | null
         telegram?: string | null
+        whatsapp?: string | null
         notes?: string | null
       }[]
     }>('/api/contacts'),
@@ -126,6 +181,7 @@ export const api = {
     name: string
     email?: string
     telegram?: string
+    whatsapp?: string
     notes?: string
     id?: string
   }) =>

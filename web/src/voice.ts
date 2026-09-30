@@ -1,9 +1,11 @@
-/** Browser voice I/O: SpeechRecognition + speechSynthesis, Whisper fallback. */
+/** Browser + HQ (Whisper/TTS) voice I/O. */
 
 export type VoicePrefs = {
   replies: boolean
   autoSend: boolean
   lang: string
+  /** Prefer Whisper STT + server TTS when an AI key is available. */
+  hq: boolean
 }
 
 const PREFS_KEY = 'nexus_voice_prefs'
@@ -17,12 +19,13 @@ export function loadVoicePrefs(): VoicePrefs {
         replies: Boolean(p.replies),
         autoSend: p.autoSend !== false,
         lang: typeof p.lang === 'string' && p.lang ? p.lang : guessLang(),
+        hq: p.hq !== false,
       }
     }
   } catch {
     /* ignore */
   }
-  return { replies: false, autoSend: true, lang: guessLang() }
+  return { replies: false, autoSend: true, lang: guessLang(), hq: true }
 }
 
 export function saveVoicePrefs(prefs: VoicePrefs) {
@@ -137,7 +140,7 @@ export function startListening(opts: {
   }
 }
 
-/** Record a short audio clip (for Whisper fallback). */
+/** Record a short audio clip (for Whisper). */
 export async function recordAudioBlob(maxMs = 20000): Promise<Blob> {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
   const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
@@ -166,7 +169,6 @@ export async function recordAudioBlob(maxMs = 20000): Promise<Blob> {
       resolve(new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }))
     }
     recorder.start()
-    // Caller should call stop via returned control — expose on window for simplicity via Abort
     ;(recordAudioBlob as unknown as { _active?: MediaRecorder })._active = recorder
   })
 }
@@ -176,13 +178,19 @@ export function stopActiveRecording() {
   if (rec && rec.state === 'recording') rec.stop()
 }
 
-export function speakText(text: string, lang: string): void {
-  if (!speechSynthesisSupported()) return
-  const clean = (text || '')
+let activeAudio: HTMLAudioElement | null = null
+
+function cleanSpeakText(text: string): string {
+  return (text || '')
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/[`*_#>+-]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
+}
+
+export function speakText(text: string, lang: string): void {
+  if (!speechSynthesisSupported()) return
+  const clean = cleanSpeakText(text)
   if (!clean) return
   window.speechSynthesis.cancel()
   const utter = new SpeechSynthesisUtterance(clean.slice(0, 1200))
@@ -196,6 +204,40 @@ export function speakText(text: string, lang: string): void {
   window.speechSynthesis.speak(utter)
 }
 
+/** Play HQ TTS from an audio Blob (mp3). Falls back to browser TTS on failure. */
+export async function speakHqBlob(blob: Blob, fallbackText: string, lang: string): Promise<void> {
+  stopSpeaking()
+  try {
+    const url = URL.createObjectURL(blob)
+    const audio = new Audio(url)
+    activeAudio = audio
+    await new Promise<void>((resolve, reject) => {
+      audio.onended = () => {
+        URL.revokeObjectURL(url)
+        if (activeAudio === audio) activeAudio = null
+        resolve()
+      }
+      audio.onerror = () => {
+        URL.revokeObjectURL(url)
+        if (activeAudio === audio) activeAudio = null
+        reject(new Error('audio play failed'))
+      }
+      void audio.play().catch(reject)
+    })
+  } catch {
+    speakText(fallbackText, lang)
+  }
+}
+
 export function stopSpeaking() {
   if (speechSynthesisSupported()) window.speechSynthesis.cancel()
+  if (activeAudio) {
+    try {
+      activeAudio.pause()
+      activeAudio.src = ''
+    } catch {
+      /* ignore */
+    }
+    activeAudio = null
+  }
 }

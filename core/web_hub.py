@@ -21,6 +21,7 @@ from core.accounts import Account, AccountStore
 from core.agent import Agent
 from core.audit import get_audit_logger
 from core.backup import build_backup_zip
+from core.briefing import BriefingNotifier, BriefingScheduleStore
 from core.chat_history import ChatHistory
 from core.config import Settings
 from core.contacts import ContactStore
@@ -59,6 +60,27 @@ class LoginBody(BaseModel):
 class ChatBody(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
     attachment_ids: list[str] = Field(default_factory=list)
+    conversation_id: str = "main"
+
+
+class ConversationBody(BaseModel):
+    title: str = "New chat"
+
+
+class ConversationPatch(BaseModel):
+    title: str
+
+
+class BriefingScheduleBody(BaseModel):
+    enabled: bool = True
+    hour: int = 8
+    minute: int = 0
+
+
+class SpeakBody(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+    voice: str = "alloy"
+    language: str = ""
 
 
 class ProfilePatch(BaseModel):
@@ -98,6 +120,7 @@ class ContactBody(BaseModel):
     name: str
     email: str = ""
     telegram: str = ""
+    whatsapp: str = ""
     notes: str = ""
     id: str | None = None
 
@@ -151,12 +174,13 @@ def create_app(
     contacts = ContactStore(settings.data_dir / "contacts")
     google_tokens = GoogleTokenStore(settings.data_dir / "google", secret_box)
     uploads = UploadStore(settings.data_dir / "uploads")
+    briefing_schedules = BriefingScheduleStore(settings.data_dir / "briefing")
     agents: dict[str, Agent] = {}
     agents_guard = threading.Lock()
     agent_locks: dict[str, threading.Lock] = {}
     agent_locks_guard = threading.Lock()
 
-    app = FastAPI(title="Nexus Node", version="0.2.0")
+    app = FastAPI(title="Nexus Node", version="0.3.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -165,17 +189,23 @@ def create_app(
         allow_headers=["*"],
     )
 
-    def _lock_for(user_id: str) -> threading.Lock:
+    def _agent_key(user_id: str, conversation_id: str = "main") -> str:
+        cid = (conversation_id or "main").strip() or "main"
+        return f"{user_id}::{cid}"
+
+    def _lock_for(user_id: str, conversation_id: str = "main") -> threading.Lock:
+        key = _agent_key(user_id, conversation_id)
         with agent_locks_guard:
-            lock = agent_locks.get(user_id)
+            lock = agent_locks.get(key)
             if lock is None:
                 lock = threading.Lock()
-                agent_locks[user_id] = lock
+                agent_locks[key] = lock
             return lock
 
-    def _agent_for(account: Account) -> Agent:
+    def _agent_for(account: Account, conversation_id: str = "main") -> Agent:
+        key = _agent_key(account.id, conversation_id)
         with agents_guard:
-            agent = agents.get(account.id)
+            agent = agents.get(key)
             role = Role.OWNER if account.role == "owner" else Role.FRIEND
             device_id = account.resolve_device_id(devices.local_id)
             profile = _account_to_profile(account)
@@ -189,16 +219,16 @@ def create_app(
                     settings,
                     confirm_fn=confirm_fn,
                     audit=audit,
-                    source=f"web:{account.id}",
+                    source=f"web:{account.id}:{conversation_id}",
                     role=role,
                     requester_id=account.id,
                     user_profile=profile,
                     devices=devices,
                     active_device_id=device_id,
                 )
-                transcript = chats.load(account.id)
+                transcript = chats.load(account.id, conversation_id)
                 agent.seed_from_transcript(ChatHistory.llm_turns(transcript))
-                agents[account.id] = agent
+                agents[key] = agent
             else:
                 agent.confirm_fn = confirm_fn
                 agent.user_profile = profile
@@ -448,9 +478,20 @@ def create_app(
             "telegram_messaging": {
                 "ready": bool((os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()),
             },
+            "whatsapp_messaging": {
+                "ready": bool(
+                    (os.getenv("WHATSAPP_TOKEN") or "").strip()
+                    and (os.getenv("WHATSAPP_PHONE_NUMBER_ID") or "").strip()
+                ),
+            },
             "contacts": {"ready": True},
             "google": google_tokens.status(account.id),
-            "briefing": {"ready": True},
+            "briefing": {
+                "ready": True,
+                "schedule": briefing_schedules.get(account.id),
+                "timezone": "UTC",
+            },
+            "hq_voice": {"ready": bool((account.api_key or settings.openai_api_key or "").strip())},
             "uploads": {"ready": True},
             "backup": {"ready": account.role == "owner"},
         }
@@ -469,6 +510,7 @@ def create_app(
                 name=body.name,
                 email=body.email,
                 telegram=body.telegram,
+                whatsapp=body.whatsapp,
                 notes=body.notes,
                 contact_id=body.id,
             )
@@ -600,12 +642,12 @@ def create_app(
         language: str = Form(default=""),
         account: Account = Depends(require_account),
     ) -> dict[str, Any]:
-        """Whisper fallback when the browser has no SpeechRecognition."""
+        """Whisper STT (HQ voice path)."""
         api_key = (account.api_key or settings.openai_api_key or "").strip()
         if not api_key:
             raise HTTPException(
                 400,
-                "Add your AI API key in Settings to use Whisper voice fallback.",
+                "Add your AI API key in Settings to use Whisper voice.",
             )
         raw = await file.read()
         if not raw:
@@ -652,15 +694,124 @@ def create_app(
             raise HTTPException(400, "No speech detected")
         return {"text": text}
 
+    @app.post("/api/voice/speak")
+    async def voice_speak(
+        body: SpeakBody, account: Account = Depends(require_account)
+    ) -> Response:
+        """OpenAI TTS for HQ voice replies."""
+        api_key = (account.api_key or settings.openai_api_key or "").strip()
+        if not api_key:
+            raise HTTPException(400, "Add your AI API key in Settings for HQ voice.")
+        base = (account.api_base_url or settings.openai_base_url or "https://api.openai.com/v1").rstrip(
+            "/"
+        )
+        clean = (body.text or "").strip()[:4000]
+        if not clean:
+            raise HTTPException(400, "Empty text")
+        voice = (body.voice or "alloy").strip() or "alloy"
+        # Prefer Russian-friendly voice when lang hints ru
+        lang = (body.language or "").lower()
+        if lang.startswith("ru") and voice == "alloy":
+            voice = "nova"
+
+        def _tts() -> bytes:
+            import httpx
+
+            with httpx.Client(timeout=120.0) as client:
+                resp = client.post(
+                    f"{base}/audio/speech",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "tts-1",
+                        "voice": voice,
+                        "input": clean,
+                        "response_format": "mp3",
+                    },
+                )
+            if resp.status_code >= 400:
+                raise RuntimeError(resp.text[:400] or f"HTTP {resp.status_code}")
+            return resp.content
+
+        try:
+            audio = await asyncio.to_thread(_tts)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"Speech failed: {exc}") from exc
+        return Response(content=audio, media_type="audio/mpeg")
+
+    @app.get("/api/conversations")
+    def list_conversations(account: Account = Depends(require_account)) -> dict[str, Any]:
+        return {"conversations": chats.list_conversations(account.id)}
+
+    @app.post("/api/conversations")
+    def create_conversation(
+        body: ConversationBody, account: Account = Depends(require_account)
+    ) -> dict[str, Any]:
+        return {"conversation": chats.create_conversation(account.id, body.title)}
+
+    @app.patch("/api/conversations/{conversation_id}")
+    def rename_conversation(
+        conversation_id: str,
+        body: ConversationPatch,
+        account: Account = Depends(require_account),
+    ) -> dict[str, Any]:
+        conv = chats.rename_conversation(account.id, conversation_id, body.title)
+        if not conv:
+            raise HTTPException(404, "Conversation not found")
+        return {"conversation": conv}
+
+    @app.delete("/api/conversations/{conversation_id}")
+    def delete_conversation(
+        conversation_id: str, account: Account = Depends(require_account)
+    ) -> dict[str, Any]:
+        ok = chats.delete_conversation(account.id, conversation_id)
+        if not ok:
+            raise HTTPException(404, "Conversation not found")
+        key = _agent_key(account.id, conversation_id)
+        with agents_guard:
+            agent = agents.pop(key, None)
+            if agent is not None:
+                agent.reset()
+        return {"ok": True}
+
+    @app.get("/api/briefing/schedule")
+    def get_briefing_schedule_api(account: Account = Depends(require_account)) -> dict[str, Any]:
+        return {"schedule": briefing_schedules.get(account.id), "timezone": "UTC"}
+
+    @app.put("/api/briefing/schedule")
+    def put_briefing_schedule_api(
+        body: BriefingScheduleBody, account: Account = Depends(require_account)
+    ) -> dict[str, Any]:
+        cfg = briefing_schedules.set(
+            account.id,
+            enabled=body.enabled,
+            hour=body.hour,
+            minute=body.minute,
+        )
+        return {"schedule": cfg, "timezone": "UTC"}
+
     @app.get("/api/chat")
-    def get_chat(account: Account = Depends(require_account)) -> dict[str, Any]:
-        return {"messages": chats.load(account.id)}
+    def get_chat(
+        conversation_id: str = "main",
+        account: Account = Depends(require_account),
+    ) -> dict[str, Any]:
+        return {
+            "conversation_id": conversation_id or "main",
+            "messages": chats.load(account.id, conversation_id or "main"),
+        }
 
     @app.delete("/api/chat")
-    def clear_chat(account: Account = Depends(require_account)) -> dict[str, Any]:
-        chats.clear(account.id)
+    def clear_chat(
+        conversation_id: str = "main",
+        account: Account = Depends(require_account),
+    ) -> dict[str, Any]:
+        cid = conversation_id or "main"
+        chats.clear(account.id, cid)
+        key = _agent_key(account.id, cid)
         with agents_guard:
-            agent = agents.pop(account.id, None)
+            agent = agents.pop(key, None)
             if agent is not None:
                 agent.reset()
         return {"ok": True}
@@ -672,7 +823,8 @@ def create_app(
         text = body.message.strip()
         if not text:
             raise HTTPException(400, "Empty message")
-        lock = _lock_for(account.id)
+        cid = (body.conversation_id or "main").strip() or "main"
+        lock = _lock_for(account.id, cid)
         if not lock.acquire(blocking=False):
             raise HTTPException(409, "Already working on your previous message")
 
@@ -693,21 +845,26 @@ def create_app(
 
         def run() -> str:
             try:
-                agent = _agent_for(account)
+                agent = _agent_for(account, cid)
                 device_id = account.resolve_device_id(devices.local_id)
                 with request_context(user_id=account.id, device_id=device_id):
                     return agent.run(agent_input)
             finally:
                 lock.release()
 
-        chats.append(account.id, "user", text + (f" (+{len(attach_bits)} file(s))" if attach_bits else ""))
+        chats.append(
+            account.id,
+            "user",
+            text + (f" (+{len(attach_bits)} file(s))" if attach_bits else ""),
+            cid,
+        )
         try:
             reply = await asyncio.to_thread(run)
         except Exception:
-            chats.append(account.id, "system", "Chat failed — try again.")
+            chats.append(account.id, "system", "Chat failed — try again.", cid)
             raise
-        chats.append(account.id, "assistant", reply or "(empty)")
-        return {"reply": reply}
+        chats.append(account.id, "assistant", reply or "(empty)", cid)
+        return {"reply": reply, "conversation_id": cid}
 
     @app.post("/api/confirm")
     def confirm(
@@ -781,12 +938,12 @@ def create_app(
         finally:
             broker.unsubscribe(account.id, queue)
 
-    # Reminder pings → in-app via audit + optional WS notify to that user id
+    # Reminder / briefing pings → in-app via audit + optional WS notify
     def _send_reminder(user_id: str, text: str) -> bool:
         live = broker.notify(user_id, {"type": "reminder", "text": text})
         pushed = push.send(user_id, "Nexus Node", text)
         if live or pushed:
-            chats.append(user_id, "system", text)
+            chats.append(user_id, "system", text, "main")
             audit.log(
                 "reminder_delivered",
                 user_id=user_id,
@@ -798,16 +955,38 @@ def create_app(
         # Nobody listening and no push subscription — retry next tick.
         return False
 
+    def _send_briefing(user_id: str, text: str) -> bool:
+        live = broker.notify(user_id, {"type": "briefing", "text": text})
+        pushed = push.send(user_id, "Daily briefing", text[:180])
+        if live or pushed:
+            chats.append(user_id, "system", text, "main")
+            audit.log(
+                "briefing_delivered",
+                user_id=user_id,
+                text=text[:120],
+                ws=live,
+                push=pushed,
+            )
+            return True
+        return False
+
     notifier = ReminderNotifier(
         daily_root=settings.data_dir / "daily",
         send=_send_reminder,
         interval_seconds=30.0,
     )
     notifier.start()
+    briefing_notifier = BriefingNotifier(
+        briefing_schedules,
+        send=_send_briefing,
+        interval_seconds=60.0,
+    )
+    briefing_notifier.start()
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
         notifier.stop()
+        briefing_notifier.stop()
 
     # Static UI (production build)
     web_dist = Path(__file__).resolve().parent.parent / "web" / "dist"

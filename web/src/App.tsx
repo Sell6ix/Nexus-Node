@@ -10,6 +10,7 @@ import {
   speechSynthesisSupported,
   startListening,
   speakText,
+  speakHqBlob,
   stopSpeaking,
   recordAudioBlob,
   stopActiveRecording,
@@ -20,6 +21,9 @@ import {
 type Msg = { role: 'user' | 'assistant' | 'system'; text: string }
 type ConfirmReq = { id: string; prompt: string; timeout: number }
 type Tab = 'chat' | 'devices' | 'settings'
+type Conversation = { id: string; title: string; created_at?: number; updated_at?: number }
+
+const CONV_KEY = 'nexus_active_conversation'
 
 export default function App() {
   const [boot, setBoot] = useState<'loading' | 'auth' | 'app'>('loading')
@@ -32,6 +36,11 @@ export default function App() {
     text: 'Ask anything — or tap the mic and talk. Notes, search, calendar, diary…',
   }
   const [messages, setMessages] = useState<Msg[]>([welcome])
+  const [conversations, setConversations] = useState<Conversation[]>([])
+  const [conversationId, setConversationId] = useState(
+    () => localStorage.getItem(CONV_KEY) || 'main',
+  )
+  const conversationIdRef = useRef(conversationId)
   const [chatReady, setChatReady] = useState(false)
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -46,10 +55,30 @@ export default function App() {
   const bottomRef = useRef<HTMLDivElement>(null)
   const listenRef = useRef<ListenHandle | null>(null)
   const busyRef = useRef(false)
+  const deepLinkDone = useRef(false)
 
-  async function loadChat() {
+  useEffect(() => {
+    conversationIdRef.current = conversationId
+    localStorage.setItem(CONV_KEY, conversationId)
+  }, [conversationId])
+
+  async function loadConversations() {
     try {
-      const res = await api.getChat()
+      const res = await api.listConversations()
+      const rows = res.conversations || []
+      setConversations(rows)
+      if (rows.length && !rows.some((c) => c.id === conversationIdRef.current)) {
+        setConversationId(rows[0].id)
+      }
+    } catch {
+      setConversations([{ id: 'main', title: 'General' }])
+    }
+  }
+
+  async function loadChat(cid?: string) {
+    const id = cid || conversationIdRef.current || 'main'
+    try {
+      const res = await api.getChat(id)
       const rows = (res.messages || []).map((m) => ({
         role: m.role,
         text: m.text,
@@ -62,6 +91,20 @@ export default function App() {
     }
   }
 
+  async function speakReply(text: string) {
+    if (!voicePrefs.replies) return
+    if (voicePrefs.hq && user?.has_api_key) {
+      try {
+        const blob = await api.speak(text, voicePrefs.lang)
+        await speakHqBlob(blob, text, voicePrefs.lang)
+        return
+      } catch {
+        /* fall through */
+      }
+    }
+    speakText(text, voicePrefs.lang)
+  }
+
   useEffect(() => {
     ;(async () => {
       try {
@@ -72,6 +115,7 @@ export default function App() {
           const me = await api.me()
           setUser(me.user)
           setBoot('app')
+          await loadConversations()
           await loadChat()
         } else {
           setBoot('auth')
@@ -112,6 +156,29 @@ export default function App() {
   }, [boot])
 
   useEffect(() => {
+    if (boot !== 'app' || !chatReady || deepLinkDone.current) return
+    const q = new URLSearchParams(location.search)
+    const tabQ = q.get('tab')
+    if (tabQ === 'chat' || tabQ === 'devices' || tabQ === 'settings') setTab(tabQ)
+    if (q.get('briefing') === '1') {
+      deepLinkDone.current = true
+      history.replaceState({}, '', location.pathname)
+      void sendMessage('Give me my daily briefing.')
+      return
+    }
+    if (q.get('voice') === '1') {
+      deepLinkDone.current = true
+      history.replaceState({}, '', location.pathname)
+      void toggleMic()
+      return
+    }
+    if (tabQ) {
+      deepLinkDone.current = true
+      history.replaceState({}, '', location.pathname)
+    }
+  }, [boot, chatReady])
+
+  useEffect(() => {
     if (boot !== 'app') return
     const token = getToken()
     if (!token) return
@@ -127,12 +194,26 @@ export default function App() {
           if (data.type === 'confirm') {
             setConfirm({ id: data.id, prompt: data.prompt, timeout: data.timeout || 120 })
           }
-          if (data.type === 'reminder') {
-            setToast(data.text || 'Reminder')
-            setMessages((m) => [...m, { role: 'system', text: data.text }])
-            showLocalNotification('Nexus Node', data.text)
+          if (data.type === 'reminder' || data.type === 'briefing') {
+            setToast(data.text || (data.type === 'briefing' ? 'Briefing' : 'Reminder'))
+            if (conversationIdRef.current === 'main') {
+              setMessages((m) => [...m, { role: 'system', text: data.text }])
+            }
+            showLocalNotification(
+              data.type === 'briefing' ? 'Daily briefing' : 'Nexus Node',
+              data.text,
+            )
             const prefs = loadVoicePrefs()
-            if (prefs.replies && data.text) speakText(String(data.text), prefs.lang)
+            if (prefs.replies && data.text) {
+              if (prefs.hq) {
+                void api
+                  .speak(String(data.text), prefs.lang)
+                  .then((blob) => speakHqBlob(blob, String(data.text), prefs.lang))
+                  .catch(() => speakText(String(data.text), prefs.lang))
+              } else {
+                speakText(String(data.text), prefs.lang)
+              }
+            }
           }
         } catch {
           /* ignore */
@@ -166,6 +247,7 @@ export default function App() {
       setUser(res.user)
       setBoot('app')
       setChatReady(false)
+      await loadConversations()
       await loadChat()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Auth failed')
@@ -174,10 +256,31 @@ export default function App() {
     }
   }
 
+  async function switchConversation(id: string) {
+    if (id === conversationId || busy) return
+    stopMic()
+    setConversationId(id)
+    setChatReady(false)
+    setPendingFiles([])
+    await loadChat(id)
+  }
+
+  async function newConversation() {
+    if (busy) return
+    try {
+      const res = await api.createConversation('New chat')
+      await loadConversations()
+      await switchConversation(res.conversation.id)
+      setToast('New chat')
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : 'Could not create chat')
+    }
+  }
+
   async function clearChat() {
     if (busy) return
     try {
-      await api.clearChat()
+      await api.clearChat(conversationId)
       setMessages([welcome])
       setToast('Chat cleared')
     } catch (e) {
@@ -196,12 +299,15 @@ export default function App() {
     setMessages((m) => [...m, { role: 'user', text: label || '(file)' }])
     setBusy(true)
     try {
-      const res = await api.chat(text || 'Please look at the attached file(s).', ids)
+      const res = await api.chat(
+        text || 'Please look at the attached file(s).',
+        ids,
+        conversationIdRef.current,
+      )
       const reply = res.reply || '(empty)'
       setMessages((m) => [...m, { role: 'assistant', text: reply }])
-      if (voicePrefs.replies) {
-        speakText(reply, voicePrefs.lang)
-      }
+      void speakReply(reply)
+      void loadConversations()
     } catch (err) {
       setMessages((m) => [
         ...m,
@@ -239,6 +345,32 @@ export default function App() {
     setRecordingFallback(false)
   }
 
+  async function runWhisperCapture() {
+    if (!user?.has_api_key) {
+      setToast('HQ voice needs an AI key in Settings (or use browser STT with HQ off).')
+      return
+    }
+    setRecordingFallback(true)
+    setToast('Listening… tap mic again when done')
+    try {
+      const blob = await recordAudioBlob(30000)
+      setRecordingFallback(false)
+      if (blob.size < 1000) {
+        setToast('Recording too short')
+        return
+      }
+      setToast('Transcribing…')
+      const lang = voicePrefs.lang.split('-')[0] || ''
+      const res = await api.transcribe(blob, lang)
+      setToast('')
+      setInput(res.text)
+      if (voicePrefs.autoSend) void sendMessage(res.text)
+    } catch (e) {
+      setRecordingFallback(false)
+      setToast(e instanceof Error ? e.message : 'Voice recording failed')
+    }
+  }
+
   async function toggleMic() {
     if (listening || recordingFallback) {
       stopMic()
@@ -247,6 +379,12 @@ export default function App() {
     if (busy) return
     stopSpeaking()
     setToast('')
+
+    // HQ path: Whisper-first when enabled and keyed
+    if (voicePrefs.hq && user?.has_api_key) {
+      await runWhisperCapture()
+      return
+    }
 
     if (speechRecognitionSupported()) {
       setListening(true)
@@ -278,30 +416,7 @@ export default function App() {
       return
     }
 
-    // Whisper fallback: tap once to start, tap again to stop & transcribe
-    if (!user?.has_api_key) {
-      setToast('Voice needs Chrome/Edge speech, or an AI key for Whisper fallback.')
-      return
-    }
-    setRecordingFallback(true)
-    setToast('Listening… tap mic again when done')
-    try {
-      const blob = await recordAudioBlob(30000)
-      setRecordingFallback(false)
-      if (blob.size < 1000) {
-        setToast('Recording too short')
-        return
-      }
-      setToast('Transcribing…')
-      const lang = voicePrefs.lang.split('-')[0] || ''
-      const res = await api.transcribe(blob, lang)
-      setToast('')
-      setInput(res.text)
-      if (voicePrefs.autoSend) void sendMessage(res.text)
-    } catch (e) {
-      setRecordingFallback(false)
-      setToast(e instanceof Error ? e.message : 'Voice recording failed')
-    }
+    await runWhisperCapture()
   }
 
   async function answerConfirm(allowed: boolean) {
@@ -400,6 +515,31 @@ export default function App() {
 
       {tab === 'chat' && (
         <section className="flex-1 flex flex-col min-h-0">
+          <div className="flex flex-wrap items-center gap-2 pb-2">
+            <select
+              value={conversationId}
+              onChange={(e) => void switchConversation(e.target.value)}
+              disabled={busy || !chatReady}
+              className="flex-1 min-w-[10rem] text-sm bg-[var(--panel)] border border-[var(--line)] rounded-xl px-3 py-2"
+              aria-label="Conversation"
+            >
+              {(conversations.length ? conversations : [{ id: 'main', title: 'General' }]).map(
+                (c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.title || c.id}
+                  </option>
+                ),
+              )}
+            </select>
+            <button
+              type="button"
+              onClick={() => void newConversation()}
+              disabled={busy}
+              className="text-xs px-3 py-2 rounded-xl border border-[var(--line)] text-[var(--muted)] hover:text-[var(--text)] disabled:opacity-40"
+            >
+              New chat
+            </button>
+          </div>
           <div className="flex flex-wrap items-center justify-between gap-2 pb-2">
             <p className="text-xs text-[var(--muted)]">
               {listening || recordingFallback
@@ -422,6 +562,20 @@ export default function App() {
                 title="Speak assistant replies aloud"
               >
                 {voicePrefs.replies ? 'Voice replies on' : 'Voice replies'}
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setVoicePrefs((p) => ({ ...p, hq: !p.hq }))
+                }
+                className={`text-xs px-2 py-1 rounded-lg border ${
+                  voicePrefs.hq
+                    ? 'border-[var(--accent)] text-[var(--accent)]'
+                    : 'border-[var(--line)] text-[var(--muted)]'
+                }`}
+                title="Whisper + server TTS (needs AI key)"
+              >
+                {voicePrefs.hq ? 'HQ voice' : 'Browser voice'}
               </button>
               <button
                 type="button"
@@ -530,11 +684,13 @@ export default function App() {
                 <option value="uk-UA">Українська</option>
                 <option value="de-DE">Deutsch</option>
               </select>
-              {!speechRecognitionSupported() && (
-                <span className="text-xs text-[var(--muted)]">
-                  Browser STT unavailable — Whisper fallback if AI key set
-                </span>
-              )}
+              <span className="text-xs text-[var(--muted)]">
+                {voicePrefs.hq
+                  ? 'HQ: Whisper in, TTS out (AI key)'
+                  : speechRecognitionSupported()
+                    ? 'Browser speech'
+                    : 'Browser STT unavailable — enable HQ voice'}
+              </span>
             </div>
           </form>
         </section>
@@ -875,9 +1031,23 @@ function SettingsPanel({
   const [assistantNote, setAssistantNote] = useState('')
   const [googleNote, setGoogleNote] = useState('Checking Google…')
   const [contacts, setContacts] = useState<
-    { id: string; name: string; email?: string | null; telegram?: string | null }[]
+    {
+      id: string
+      name: string
+      email?: string | null
+      telegram?: string | null
+      whatsapp?: string | null
+    }[]
   >([])
-  const [contactForm, setContactForm] = useState({ name: '', email: '', telegram: '' })
+  const [contactForm, setContactForm] = useState({
+    name: '',
+    email: '',
+    telegram: '',
+    whatsapp: '',
+  })
+  const [briefEnabled, setBriefEnabled] = useState(false)
+  const [briefHour, setBriefHour] = useState(8)
+  const [briefMinute, setBriefMinute] = useState(0)
 
   async function reloadContacts() {
     const res = await api.contacts()
@@ -904,8 +1074,18 @@ function SettingsPanel({
           `Search: ${a.web_search.preferred}`,
           a.email.ready ? `Email: ${a.email.from}` : 'Email: not configured',
           a.telegram_messaging.ready ? 'Telegram bot: ready' : 'Telegram bot: not set',
+          a.whatsapp_messaging?.ready ? 'WhatsApp: ready' : 'WhatsApp: not set',
+          a.hq_voice?.ready ? 'HQ voice: ready' : 'HQ voice: needs AI key',
         ]
         setAssistantNote(bits.join(' · '))
+      })
+      .catch(() => undefined)
+    void api
+      .getBriefingSchedule()
+      .then((r) => {
+        setBriefEnabled(Boolean(r.schedule?.enabled))
+        setBriefHour(Number(r.schedule?.hour ?? 8))
+        setBriefMinute(Number(r.schedule?.minute ?? 0))
       })
       .catch(() => undefined)
     void reloadContacts().catch(() => undefined)
@@ -991,14 +1171,69 @@ function SettingsPanel({
       <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-2">
         <div className="font-medium">Assistant capabilities</div>
         <p className="text-xs text-[var(--muted)] leading-relaxed">
-          Ask for a daily briefing, search the web, remember facts, diary, calendar,
-          Gmail, or message a contact. Outbound mail always asks Allow. Attach files
-          in chat with File.
+          Multiple chats, scheduled briefing, HQ voice (Whisper + TTS), search, memory,
+          diary, calendar, Gmail, email / Telegram / WhatsApp. Outbound always asks Allow.
         </p>
         <p className="text-xs text-[var(--text)]">{assistantNote || 'Loading…'}</p>
         <p className="text-xs text-[var(--muted)]">
-          Try: «сделай утренний брифинг» · «что в почте» · «напомни когда открою приложение»
+          Try: «включи брифинг в 8 UTC» · «что в почте» · «напиши Маше в WhatsApp…»
         </p>
+      </div>
+
+      <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">
+        <div className="font-medium">Morning briefing (auto)</div>
+        <p className="text-xs text-[var(--muted)]">
+          Push a daily summary over WebSocket / notifications at a UTC time. Enable
+          phone notifications below so it can wake the device.
+        </p>
+        <label className="text-sm flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={briefEnabled}
+            onChange={(e) => setBriefEnabled(e.target.checked)}
+          />
+          Enabled
+        </label>
+        <div className="flex flex-wrap gap-2 items-center">
+          <label className="text-xs text-[var(--muted)]">
+            Hour (UTC)
+            <input
+              type="number"
+              min={0}
+              max={23}
+              value={briefHour}
+              onChange={(e) => setBriefHour(Number(e.target.value))}
+              className="ml-2 w-16 rounded-lg bg-[var(--ink)]/60 border border-[var(--line)] px-2 py-1"
+            />
+          </label>
+          <label className="text-xs text-[var(--muted)]">
+            Minute
+            <input
+              type="number"
+              min={0}
+              max={59}
+              value={briefMinute}
+              onChange={(e) => setBriefMinute(Number(e.target.value))}
+              className="ml-2 w-16 rounded-lg bg-[var(--ink)]/60 border border-[var(--line)] px-2 py-1"
+            />
+          </label>
+          <button
+            type="button"
+            className="rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] font-semibold px-4 py-2"
+            onClick={() => {
+              void api
+                .setBriefingSchedule({
+                  enabled: briefEnabled,
+                  hour: briefHour,
+                  minute: briefMinute,
+                })
+                .then(() => onToast('Briefing schedule saved'))
+                .catch((e) => onToast(e.message))
+            }}
+          >
+            Save schedule
+          </button>
+        </div>
       </div>
 
       <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">
@@ -1061,7 +1296,7 @@ function SettingsPanel({
       <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">
         <div className="font-medium">Contacts</div>
         <p className="text-xs text-[var(--muted)]">
-          Save people the assistant can email or Telegram (after your confirmation).
+          Email, Telegram, or WhatsApp (E.164 digits). Outbound always asks Allow.
         </p>
         <ul className="space-y-2">
           {contacts.length === 0 && (
@@ -1075,7 +1310,11 @@ function SettingsPanel({
               <div>
                 <div className="text-sm font-medium">{c.name}</div>
                 <div className="text-xs text-[var(--muted)]">
-                  {[c.email, c.telegram ? `@${String(c.telegram).replace(/^@/, '')}` : null]
+                  {[
+                    c.email,
+                    c.telegram ? `@${String(c.telegram).replace(/^@/, '')}` : null,
+                    c.whatsapp ? `WA ${c.whatsapp}` : null,
+                  ]
                     .filter(Boolean)
                     .join(' · ') || 'no channel'}
                 </div>
@@ -1097,12 +1336,18 @@ function SettingsPanel({
           ))}
         </ul>
         <div className="space-y-2 pt-1">
-          {(['name', 'email', 'telegram'] as const).map((k) => (
+          {(['name', 'email', 'telegram', 'whatsapp'] as const).map((k) => (
             <input
               key={k}
               value={contactForm[k]}
               onChange={(e) => setContactForm({ ...contactForm, [k]: e.target.value })}
-              placeholder={k === 'telegram' ? 'telegram chat id or @user' : k}
+              placeholder={
+                k === 'telegram'
+                  ? 'telegram chat id or @user'
+                  : k === 'whatsapp'
+                    ? 'whatsapp phone (e.g. 79001234567)'
+                    : k
+              }
               className="w-full rounded-xl bg-[var(--ink)]/60 border border-[var(--line)] px-3 py-2 text-sm"
             />
           ))}
@@ -1113,7 +1358,7 @@ function SettingsPanel({
               void api
                 .upsertContact(contactForm)
                 .then(() => {
-                  setContactForm({ name: '', email: '', telegram: '' })
+                  setContactForm({ name: '', email: '', telegram: '', whatsapp: '' })
                   return reloadContacts()
                 })
                 .then(() => onToast('Contact saved'))

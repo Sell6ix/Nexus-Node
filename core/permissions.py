@@ -50,6 +50,8 @@ DEFAULT_FRIEND_ALLOW_TOOLS: frozenset[str] = frozenset(
         "list_calendar_events",
         "cancel_calendar_event",
         "get_daily_briefing",
+        "schedule_daily_briefing",
+        "get_briefing_schedule",
         "google_status",
         "gmail_list",
         "gmail_send",
@@ -68,6 +70,7 @@ DEFAULT_FRIEND_DENY_TOOLS: frozenset[str] = frozenset(
         "send_telegram_backup",
         "send_email",
         "send_telegram_message",
+        "send_whatsapp_message",
     }
 )
 
