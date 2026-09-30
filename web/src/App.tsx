@@ -41,6 +41,8 @@ export default function App() {
   const [voicePrefs, setVoicePrefs] = useState<VoicePrefs>(() => loadVoicePrefs())
   const [listening, setListening] = useState(false)
   const [recordingFallback, setRecordingFallback] = useState(false)
+  const [pendingFiles, setPendingFiles] = useState<{ id: string; filename: string }[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const listenRef = useRef<ListenHandle | null>(null)
   const busyRef = useRef(false)
@@ -185,12 +187,16 @@ export default function App() {
 
   async function sendMessage(textRaw: string) {
     const text = textRaw.trim()
-    if (!text || busyRef.current) return
+    if ((!text && pendingFiles.length === 0) || busyRef.current) return
+    const ids = pendingFiles.map((f) => f.id)
+    const label =
+      text + (ids.length ? `${text ? ' ' : ''}(+${ids.length} file${ids.length > 1 ? 's' : ''})` : '')
     setInput('')
-    setMessages((m) => [...m, { role: 'user', text }])
+    setPendingFiles([])
+    setMessages((m) => [...m, { role: 'user', text: label || '(file)' }])
     setBusy(true)
     try {
-      const res = await api.chat(text)
+      const res = await api.chat(text || 'Please look at the attached file(s).', ids)
       const reply = res.reply || '(empty)'
       setMessages((m) => [...m, { role: 'assistant', text: reply }])
       if (voicePrefs.replies) {
@@ -203,6 +209,20 @@ export default function App() {
       ])
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function onPickFile(fileList: FileList | null) {
+    const file = fileList?.[0]
+    if (!file) return
+    try {
+      const res = await api.upload(file)
+      setPendingFiles((prev) => [...prev, { id: res.file.id, filename: res.file.filename }])
+      setToast(`Attached ${res.file.filename}`)
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : 'Upload failed')
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = ''
     }
   }
 
@@ -436,12 +456,26 @@ export default function App() {
               >
                 {listening || recordingFallback ? 'Stop' : 'Mic'}
               </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden"
+                onChange={(e) => void onPickFile(e.target.files)}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={busy}
+                className="shrink-0 min-w-14 h-12 px-3 rounded-2xl font-semibold text-sm bg-[var(--panel-2)] border border-[var(--line)] disabled:opacity-40"
+              >
+                File
+              </button>
               <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 rows={2}
                 placeholder={
-                  listening || recordingFallback ? 'Listening…' : 'Message or tap mic…'
+                  listening || recordingFallback ? 'Listening…' : 'Message, mic, or attach a file…'
                 }
                 className="flex-1 resize-none bg-transparent outline-none px-2 py-1 placeholder:text-[var(--muted)] min-h-[3rem]"
                 onKeyDown={(e) => {
@@ -453,12 +487,27 @@ export default function App() {
               />
               <button
                 type="submit"
-                disabled={busy || !input.trim()}
+                disabled={busy || (!input.trim() && pendingFiles.length === 0)}
                 className="shrink-0 rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] font-semibold px-4 py-2 disabled:opacity-40 self-end"
               >
                 Send
               </button>
             </div>
+            {pendingFiles.length > 0 && (
+              <div className="flex flex-wrap gap-2 mt-2 px-1">
+                {pendingFiles.map((f) => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    className="text-xs rounded-lg border border-[var(--line)] px-2 py-1 text-[var(--muted)]"
+                    onClick={() => setPendingFiles((prev) => prev.filter((x) => x.id !== f.id))}
+                    title="Remove attachment"
+                  >
+                    {f.filename} ×
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="flex flex-wrap gap-2 mt-2 px-1">
               <label className="text-xs text-[var(--muted)] flex items-center gap-1.5">
                 <input
@@ -824,6 +873,7 @@ function SettingsPanel({
   const [tools, setTools] = useState<string[]>([])
   const [pushNote, setPushNote] = useState('')
   const [assistantNote, setAssistantNote] = useState('')
+  const [googleNote, setGoogleNote] = useState('Checking Google…')
   const [contacts, setContacts] = useState<
     { id: string; name: string; email?: string | null; telegram?: string | null }[]
   >([])
@@ -832,6 +882,17 @@ function SettingsPanel({
   async function reloadContacts() {
     const res = await api.contacts()
     setContacts(res.contacts || [])
+  }
+
+  async function reloadGoogle() {
+    const g = await api.googleStatus()
+    if (!g.configured) {
+      setGoogleNote('Hub needs GOOGLE_CLIENT_ID / SECRET in .env')
+    } else if (g.connected) {
+      setGoogleNote(`Connected as ${g.email || 'Google account'}`)
+    } else {
+      setGoogleNote('Not connected')
+    }
   }
 
   useEffect(() => {
@@ -848,6 +909,17 @@ function SettingsPanel({
       })
       .catch(() => undefined)
     void reloadContacts().catch(() => undefined)
+    void reloadGoogle().catch(() => setGoogleNote('Google status unavailable'))
+    // OAuth return
+    const q = new URLSearchParams(location.search)
+    if (q.get('google') === 'connected') {
+      onToast('Google connected')
+      history.replaceState({}, '', location.pathname)
+      void reloadGoogle()
+    } else if (q.get('google') === 'error') {
+      onToast('Google connect failed')
+      history.replaceState({}, '', location.pathname)
+    }
   }, [])
 
   const toolPreview = useMemo(() => tools.slice(0, 12).join(', ') + (tools.length > 12 ? '…' : ''), [tools])
@@ -919,18 +991,72 @@ function SettingsPanel({
       <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-2">
         <div className="font-medium">Assistant capabilities</div>
         <p className="text-xs text-[var(--muted)] leading-relaxed">
-          Ask in chat to search the web, remember facts about you, write a diary
-          entry, check the calendar, or message a contact. Outbound email/Telegram
-          always asks Allow first. Notes = short sticky items; diary = dated journal.
+          Ask for a daily briefing, search the web, remember facts, diary, calendar,
+          Gmail, or message a contact. Outbound mail always asks Allow. Attach files
+          in chat with File.
         </p>
         <p className="text-xs text-[var(--text)]">{assistantNote || 'Loading…'}</p>
         <p className="text-xs text-[var(--muted)]">
-          Hub .env: optional <code className="text-[var(--accent)]">BRAVE_API_KEY</code> /{' '}
-          <code className="text-[var(--accent)]">TAVILY_API_KEY</code>,{' '}
-          <code className="text-[var(--accent)]">SMTP_*</code>,{' '}
-          <code className="text-[var(--accent)]">TELEGRAM_BOT_TOKEN</code>.
+          Try: «сделай утренний брифинг» · «что в почте» · «напомни когда открою приложение»
         </p>
       </div>
+
+      <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">
+        <div className="font-medium">Google (Gmail + Calendar)</div>
+        <p className="text-xs text-[var(--muted)]">{googleNote}</p>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] font-semibold px-4 py-2"
+            onClick={() => {
+              void api
+                .googleConnect()
+                .then((r) => {
+                  location.href = r.url
+                })
+                .catch((e) => onToast(e.message))
+            }}
+          >
+            Connect Google
+          </button>
+          <button
+            type="button"
+            className="rounded-xl border border-[var(--line)] px-4 py-2"
+            onClick={() => {
+              void api
+                .googleDisconnect()
+                .then(() => reloadGoogle())
+                .then(() => onToast('Google disconnected'))
+                .catch((e) => onToast(e.message))
+            }}
+          >
+            Disconnect
+          </button>
+        </div>
+      </div>
+
+      {user.role === 'owner' && (
+        <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">
+          <div className="font-medium">Backup</div>
+          <p className="text-xs text-[var(--muted)]">
+            Download a zip of hub data (chats, notes, calendar, contacts…). Keeps{' '}
+            <code className="text-[var(--accent)]">secrets.key</code> out of the archive —
+            copy that file separately if you need full restore.
+          </p>
+          <button
+            type="button"
+            className="rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] font-semibold px-4 py-2"
+            onClick={() => {
+              void api
+                .downloadBackup()
+                .then(() => onToast('Backup downloaded'))
+                .catch((e) => onToast(e.message))
+            }}
+          >
+            Download backup
+          </button>
+        </div>
+      )}
 
       <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3">
         <div className="font-medium">Contacts</div>

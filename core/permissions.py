@@ -49,6 +49,12 @@ DEFAULT_FRIEND_ALLOW_TOOLS: frozenset[str] = frozenset(
         "add_calendar_event",
         "list_calendar_events",
         "cancel_calendar_event",
+        "get_daily_briefing",
+        "google_status",
+        "gmail_list",
+        "gmail_send",
+        "google_calendar_list",
+        "google_calendar_add",
     }
 )
 

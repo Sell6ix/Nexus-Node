@@ -219,6 +219,14 @@ def confirmation_message_for(
         to = str(arguments.get("to") or "?").strip()
         preview = str(arguments.get("text") or "")[:120]
         return f"Send Telegram message to {to!r}?\nPreview: {preview}"
+    if name == "gmail_send":
+        to = str(arguments.get("to") or "?").strip()
+        subject = str(arguments.get("subject") or "(no subject)").strip()
+        return f"Send Gmail to {to!r} with subject {subject!r}?"
+    if name == "google_calendar_add":
+        title = str(arguments.get("title") or "?").strip()
+        when = str(arguments.get("when") or "?").strip()
+        return f"Create Google Calendar event {title!r} at {when!r}?"
     custom = getattr(func, ATTR_CONFIRMATION_MESSAGE, None)
     if custom:
         return custom

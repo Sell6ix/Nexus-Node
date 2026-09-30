@@ -64,8 +64,41 @@ export const api = {
       '/api/chat',
     ),
   clearChat: () => request<{ ok: boolean }>('/api/chat', { method: 'DELETE' }),
-  chat: (message: string) =>
-    request<{ reply: string }>('/api/chat', { method: 'POST', body: JSON.stringify({ message }) }),
+  chat: (message: string, attachmentIds: string[] = []) =>
+    request<{ reply: string }>('/api/chat', {
+      method: 'POST',
+      body: JSON.stringify({ message, attachment_ids: attachmentIds }),
+    }),
+  upload: (file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return request<{
+      file: { id: string; filename: string; content_type: string; bytes: number }
+    }>('/api/uploads', { method: 'POST', body: fd })
+  },
+  googleStatus: () =>
+    request<{ configured: boolean; connected: boolean; email: string | null; redirect_uri: string }>(
+      '/api/google/status',
+    ),
+  googleConnect: () => request<{ url: string }>('/api/google/connect'),
+  googleDisconnect: () => request<{ ok: boolean }>('/api/google/disconnect', { method: 'DELETE' }),
+  downloadBackup: async () => {
+    const token = getToken()
+    const res = await fetch('/api/backup', {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error((data as { detail?: string }).detail || res.statusText)
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `nexus-backup-${new Date().toISOString().slice(0, 10)}.zip`
+    a.click()
+    URL.revokeObjectURL(url)
+  },
   confirm: (id: string, allowed: boolean) =>
     request<{ ok: boolean }>('/api/confirm', { method: 'POST', body: JSON.stringify({ id, allowed }) }),
   invite: (label = '') =>

@@ -13,24 +13,33 @@ from typing import Any
 import jwt
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from core.accounts import Account, AccountStore
 from core.agent import Agent
 from core.audit import get_audit_logger
+from core.backup import build_backup_zip
 from core.chat_history import ChatHistory
 from core.config import Settings
 from core.contacts import ContactStore
 from core.context import request_context
 from core.devices import DeviceRegistry, ping_device
+from core.google_oauth import (
+    GoogleOAuthError,
+    GoogleTokenStore,
+    auth_url,
+    exchange_code,
+    google_configured,
+)
 from core.netinfo import hub_urls, print_hub_banner
 from core.permissions import Role
 from core.push import PushStore
 from core.registry import ToolRegistry
-from core.reminders import ReminderNotifier
+from core.reminders import ReminderNotifier, flush_app_open_reminders
 from core.secrets import default_box
+from core.uploads import UploadStore
 from core.users import UserProfile
 from core.web_confirm import WebConfirmBroker
 
@@ -49,6 +58,7 @@ class LoginBody(BaseModel):
 
 class ChatBody(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
+    attachment_ids: list[str] = Field(default_factory=list)
 
 
 class ProfilePatch(BaseModel):
@@ -139,6 +149,8 @@ def create_app(
     push = PushStore(settings.data_dir / "push.json")
     chats = ChatHistory(settings.data_dir / "chats")
     contacts = ContactStore(settings.data_dir / "contacts")
+    google_tokens = GoogleTokenStore(settings.data_dir / "google", secret_box)
+    uploads = UploadStore(settings.data_dir / "uploads")
     agents: dict[str, Agent] = {}
     agents_guard = threading.Lock()
     agent_locks: dict[str, threading.Lock] = {}
@@ -273,8 +285,19 @@ def create_app(
         audit.log("web_login", user=acc.username)
         return {"token": _token_for(acc), "user": acc.public_dict()}
 
+    def _flush_open_reminders(account: Account) -> None:
+        try:
+            flush_app_open_reminders(
+                settings.data_dir / "daily",
+                account.id,
+                send=_send_reminder,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     @app.get("/api/me")
     def me(account: Account = Depends(require_account)) -> dict[str, Any]:
+        _flush_open_reminders(account)
         return {"user": account.public_dict()}
 
     @app.patch("/api/me")
@@ -396,7 +419,6 @@ def create_app(
 
     @app.get("/api/assistant")
     def assistant_status(account: Account = Depends(require_account)) -> dict[str, Any]:
-        _ = account
         brave = bool(
             (os.getenv("BRAVE_API_KEY") or os.getenv("BRAVE_SEARCH_API_KEY") or "").strip()
         )
@@ -427,6 +449,10 @@ def create_app(
                 "ready": bool((os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()),
             },
             "contacts": {"ready": True},
+            "google": google_tokens.status(account.id),
+            "briefing": {"ready": True},
+            "uploads": {"ready": True},
+            "backup": {"ready": account.role == "owner"},
         }
 
     @app.get("/api/contacts")
@@ -458,6 +484,115 @@ def create_app(
         if not ok:
             raise HTTPException(404, "Contact not found")
         return {"ok": True}
+
+    @app.get("/api/google/status")
+    def google_status_api(account: Account = Depends(require_account)) -> dict[str, Any]:
+        return google_tokens.status(account.id)
+
+    @app.get("/api/google/connect")
+    def google_connect(account: Account = Depends(require_account)) -> dict[str, Any]:
+        if not google_configured():
+            raise HTTPException(
+                400,
+                "Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI (or NEXUS_PUBLIC_URL) on the hub.",
+            )
+        state = jwt.encode(
+            {
+                "sub": account.id,
+                "purpose": "google_oauth",
+                "exp": datetime.now(timezone.utc) + timedelta(minutes=20),
+            },
+            jwt_secret,
+            algorithm="HS256",
+        )
+        try:
+            url = auth_url(state=state)
+        except GoogleOAuthError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"url": url}
+
+    @app.get("/api/google/callback")
+    def google_callback(code: str = "", state: str = "", error: str = "") -> RedirectResponse:
+        if error:
+            return RedirectResponse(url=f"/?google=error&detail={error}", status_code=302)
+        try:
+            data = jwt.decode(state, jwt_secret, algorithms=["HS256"])
+        except jwt.PyJWTError:
+            return RedirectResponse(url="/?google=error&detail=bad_state", status_code=302)
+        if data.get("purpose") != "google_oauth":
+            return RedirectResponse(url="/?google=error&detail=bad_state", status_code=302)
+        user_id = str(data.get("sub") or "")
+        if not user_id or accounts.get(user_id) is None:
+            return RedirectResponse(url="/?google=error&detail=user", status_code=302)
+        try:
+            tokens = exchange_code(code)
+            access = str(tokens.get("access_token") or "")
+            refresh = str(tokens.get("refresh_token") or "") or None
+            google_tokens.save(
+                user_id,
+                access_token=access,
+                refresh_token=refresh,
+                expires_in=int(tokens.get("expires_in") or 3600),
+                scope=str(tokens.get("scope") or ""),
+            )
+            # fetch email
+            from core.google_oauth import GoogleClient
+
+            email = GoogleClient(google_tokens, user_id).fetch_email()
+            if email:
+                tok = google_tokens.get(user_id)
+                google_tokens.save(
+                    user_id,
+                    access_token=access,
+                    refresh_token=refresh or (tok or {}).get("refresh_token"),
+                    expires_in=int(tokens.get("expires_in") or 3600),
+                    email=email,
+                    scope=str(tokens.get("scope") or ""),
+                )
+        except Exception:  # noqa: BLE001
+            return RedirectResponse(url="/?google=error&detail=token", status_code=302)
+        audit.log("google_connected", user_id=user_id)
+        return RedirectResponse(url="/?google=connected", status_code=302)
+
+    @app.delete("/api/google/disconnect")
+    def google_disconnect(account: Account = Depends(require_account)) -> dict[str, Any]:
+        google_tokens.clear(account.id)
+        return {"ok": True}
+
+    @app.post("/api/uploads")
+    async def upload_file(
+        file: UploadFile = File(...),
+        account: Account = Depends(require_account),
+    ) -> dict[str, Any]:
+        raw = await file.read()
+        try:
+            meta = uploads.save(
+                account.id,
+                filename=file.filename or "file",
+                content_type=file.content_type or "application/octet-stream",
+                data=raw,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        public = {k: v for k, v in meta.items() if k != "path"}
+        return {"file": public}
+
+    @app.get("/api/uploads")
+    def list_uploads(account: Account = Depends(require_account)) -> dict[str, Any]:
+        rows = uploads.list(account.id)
+        return {"files": [{k: v for k, v in r.items() if k != "path"} for r in rows]}
+
+    @app.get("/api/backup")
+    def download_backup(account: Account = Depends(require_owner)) -> Response:
+        blob = build_backup_zip(settings.data_dir, include_secrets_key=False)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        return Response(
+            content=blob,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="nexus-backup-{stamp}.zip"'
+            },
+        )
 
     @app.post("/api/voice/transcribe")
     async def voice_transcribe(
@@ -541,16 +676,31 @@ def create_app(
         if not lock.acquire(blocking=False):
             raise HTTPException(409, "Already working on your previous message")
 
+        attach_bits: list[str] = []
+        for fid in body.attachment_ids or []:
+            meta = uploads.get(account.id, fid)
+            if not meta:
+                continue
+            bit = f"[Attachment {meta.get('filename')} ({meta.get('content_type')}, {meta.get('bytes')} bytes)"
+            if meta.get("text_preview"):
+                bit += f"]\n{meta['text_preview']}"
+            else:
+                bit += f" stored as {meta.get('stored_name')}]"
+            attach_bits.append(bit)
+        agent_input = text
+        if attach_bits:
+            agent_input = text + "\n\n" + "\n\n".join(attach_bits)
+
         def run() -> str:
             try:
                 agent = _agent_for(account)
                 device_id = account.resolve_device_id(devices.local_id)
                 with request_context(user_id=account.id, device_id=device_id):
-                    return agent.run(text)
+                    return agent.run(agent_input)
             finally:
                 lock.release()
 
-        chats.append(account.id, "user", text)
+        chats.append(account.id, "user", text + (f" (+{len(attach_bits)} file(s))" if attach_bits else ""))
         try:
             reply = await asyncio.to_thread(run)
         except Exception:

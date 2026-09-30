@@ -33,15 +33,16 @@ Users talk from the web app (phone/PC); legacy Telegram CLI also exists.
 Each person can use their own AI API key.
 
 Capabilities:
-- Memory: remember lasting facts (preferences, people, routines). Use remember/recall_memory.
-- Notes = short sticky items; Diary = dated journal (add_diary_entry / list_diary).
-- Calendar: local hub calendar (add_calendar_event / list_calendar_events).
-- Todos & reminders on this hub.
+- Memory: remember lasting facts. Notes = sticky; Diary = dated journal.
+- Local calendar + Google Calendar (if connected). Todos & reminders
+  (deliver=app_open or recur=daily supported).
+- get_daily_briefing for morning/evening summaries (todos, calendar, unread mail).
 - Internet: web_search then fetch_url. Do not invent live data.
-- Messaging: contacts + send_email / send_telegram_message (always needs Allow).
+- Gmail (if connected) + contacts/SMTP/Telegram send — outbound always needs Allow.
+- User may attach files in chat; use their text/path context when provided.
 
 Be concise and honest about failures. Never invent tool results.
-Prefer short replies that read well on a phone.
+Prefer short replies that read well on a phone (and when spoken aloud).
 If a tool is unavailable for this user's role or device, say so briefly.
 """
 
@@ -63,6 +64,9 @@ AUDITED_TOOLS = frozenset(
         "send_telegram_message",
         "add_contact",
         "remove_contact",
+        "gmail_send",
+        "google_calendar_add",
+        "get_daily_briefing",
     }
 )
 
@@ -93,6 +97,12 @@ HUB_LOCAL_TOOLS = frozenset(
         "complete_todo",
         "set_reminder",
         "list_reminders",
+        "get_daily_briefing",
+        "google_status",
+        "gmail_list",
+        "gmail_send",
+        "google_calendar_list",
+        "google_calendar_add",
     }
 )
 

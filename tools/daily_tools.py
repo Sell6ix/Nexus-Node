@@ -179,15 +179,23 @@ def complete_todo(todo_id: str) -> dict[str, Any]:
 
 
 @tool
-def set_reminder(text: str, when: str) -> dict[str, Any]:
-    """Store a reminder for the current user; Telegram hub will ping when due.
+def set_reminder(
+    text: str,
+    when: str = "",
+    deliver: str = "time",
+    recur: str = "",
+) -> dict[str, Any]:
+    """Store a reminder for the current user (push / in-app when due).
 
-    Prefer parseable times so delivery works: ISO datetime, ``in 10 minutes``,
-    ``HH:MM``, ``tomorrow 09:00``, or ``YYYY-MM-DD HH:MM``.
+    Prefer parseable times: ISO, ``in 10 minutes``, ``HH:MM``, ``tomorrow 09:00``.
+    Use ``deliver=app_open`` to ping the next time they open the app.
+    Use ``recur=daily`` with a clock time (e.g. when=09:00) for every day.
 
     Args:
         text: Reminder text.
-        when: When to remember (ISO / relative / clock time preferred).
+        when: When (optional if deliver=app_open).
+        deliver: ``time`` (default) or ``app_open``.
+        recur: Empty or ``daily`` (reschedules after delivery).
 
     Returns:
         The stored reminder (includes due_at when parsed).
@@ -196,16 +204,29 @@ def set_reminder(text: str, when: str) -> dict[str, Any]:
         body = text.strip()
         if not body:
             return {"ok": False, "error": "text must not be empty"}
+        mode = (deliver or "time").strip().lower()
+        if mode not in {"time", "app_open"}:
+            return {"ok": False, "error": "deliver must be 'time' or 'app_open'"}
         when_raw = when.strip()
-        if not when_raw:
-            return {"ok": False, "error": "when must not be empty"}
-        due = parse_when(when_raw)
+        recur_s = (recur or "").strip().lower()
+        if recur_s and recur_s not in {"daily"}:
+            return {"ok": False, "error": "recur must be empty or 'daily'"}
+        due = parse_when(when_raw) if when_raw else None
+        if mode == "time" and not when_raw:
+            return {"ok": False, "error": "when is required unless deliver=app_open"}
+        if mode == "time" and due is None and not recur_s:
+            return {
+                "ok": False,
+                "error": "Could not parse when. Try 'in 10 minutes', '09:00', or 'tomorrow 09:00'.",
+            }
         rows = _load(_reminders_path())
         item: dict[str, Any] = {
             "id": uuid.uuid4().hex[:10],
             "text": body,
-            "when": when_raw,
+            "when": when_raw or mode,
             "due_at": due.isoformat() if due else None,
+            "deliver": mode,
+            "recur": recur_s or None,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "done": False,
             "notified_at": None,
@@ -213,16 +234,14 @@ def set_reminder(text: str, when: str) -> dict[str, Any]:
         }
         rows.append(item)
         _save(_reminders_path(), rows[-500:])
-        if due:
-            note = (
-                f"Will ping you on Telegram around {due.isoformat()} "
-                "(hub must stay online)."
-            )
+        if mode == "app_open":
+            note = "Will show the next time you open the Nexus app (hub online)."
+        elif due:
+            note = f"Will notify around {due.isoformat()} (hub must stay online)."
+            if recur_s == "daily":
+                note += " Repeats daily."
         else:
-            note = (
-                "Stored, but time was not parseable for auto-delivery. "
-                "Use ISO, 'in 10 minutes', 'HH:MM', or 'tomorrow 09:00'."
-            )
+            note = "Stored as daily recurring; waiting for first clock match."
         return {"ok": True, "reminder": item, "note": note}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}

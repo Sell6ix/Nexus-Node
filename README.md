@@ -23,6 +23,7 @@ Phone or PC browser (PWA)
 - Web search + page fetch; contacts with confirmed email / Telegram send
 - Personal memory, diary (dated journal), and a local hub calendar
 - Voice chat: mic button (browser speech or Whisper), optional spoken replies
+- Google Gmail/Calendar OAuth, daily briefing, app-open/daily reminders, chat file attach, owner backup zip
 
 ## Quick start
 

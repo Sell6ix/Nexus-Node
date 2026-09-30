@@ -98,6 +98,38 @@ def test_memory_store(tmp_path: Path) -> None:
     assert store.list("u1") == []
 
 
+def test_backup_zip(tmp_path: Path) -> None:
+    from core.backup import build_backup_zip
+
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "chats").mkdir()
+    (data / "chats" / "u.json").write_text('{"messages":[]}\n', encoding="utf-8")
+    (data / "secrets.key").write_text("x\n", encoding="utf-8")
+    blob = build_backup_zip(data, include_secrets_key=False)
+    assert blob[:2] == b"PK"
+    import zipfile, io
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        names = zf.namelist()
+        assert any(n.endswith("chats/u.json") for n in names)
+        assert not any(n.endswith("secrets.key") for n in names)
+
+
+def test_upload_store(tmp_path: Path) -> None:
+    from core.uploads import UploadStore
+
+    store = UploadStore(tmp_path / "uploads")
+    meta = store.save(
+        "u1",
+        filename="note.txt",
+        content_type="text/plain",
+        data=b"hello diary",
+    )
+    assert meta["id"]
+    assert store.get("u1", meta["id"])["text_preview"] == "hello diary"
+
+
 def test_calendar_and_diary_tools(monkeypatch, tmp_path: Path) -> None:
     import tools.calendar_tools as cal
     import tools.daily_tools as daily

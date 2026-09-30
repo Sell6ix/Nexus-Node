@@ -108,6 +108,7 @@ def due_reminders(
     daily_root: Path,
     *,
     now: datetime | None = None,
+    include_app_open: bool = False,
 ) -> list[tuple[str, Path, dict[str, Any]]]:
     """Return (user_id, reminders_path, reminder) for due undelivered items."""
     base = now or datetime.now(timezone.utc)
@@ -124,6 +125,11 @@ def due_reminders(
         rows = load_reminders(rem_path)
         for item in rows:
             if item.get("done") or item.get("notified_at"):
+                continue
+            deliver = str(item.get("deliver") or "time").lower()
+            if deliver == "app_open":
+                if include_app_open:
+                    out.append((user_path.name, rem_path, item))
                 continue
             due: datetime | None = None
             if item.get("due_at"):
@@ -145,14 +151,40 @@ def due_reminders(
     return out
 
 
+SendFn = Callable[[str, str], bool | None]
+
+
 def mark_notified(path: Path, reminder_id: str, *, now: datetime | None = None) -> bool:
     rows = load_reminders(path)
-    stamp = (now or datetime.now(timezone.utc)).isoformat()
+    stamp_dt = now or datetime.now(timezone.utc)
+    stamp = stamp_dt.isoformat()
     found = False
     for item in rows:
         if item.get("id") == reminder_id:
-            item["notified_at"] = stamp
-            item["done"] = True
+            if str(item.get("recur") or "").lower() == "daily":
+                # Roll forward ~24h from previous due (or now).
+                nxt: datetime | None = None
+                if item.get("due_at"):
+                    try:
+                        prev = datetime.fromisoformat(
+                            str(item["due_at"]).replace("Z", "+00:00")
+                        )
+                        if prev.tzinfo is None:
+                            prev = prev.replace(tzinfo=timezone.utc)
+                        nxt = prev + timedelta(days=1)
+                        while nxt <= stamp_dt:
+                            nxt += timedelta(days=1)
+                    except ValueError:
+                        nxt = None
+                if nxt is None:
+                    nxt = parse_when(str(item.get("when") or "09:00"), now=stamp_dt + timedelta(minutes=1))
+                item["due_at"] = nxt.isoformat() if nxt else None
+                item["notified_at"] = None
+                item["done"] = False
+                item["last_notified_at"] = stamp
+            else:
+                item["notified_at"] = stamp
+                item["done"] = True
             found = True
             break
     if found:
@@ -160,7 +192,31 @@ def mark_notified(path: Path, reminder_id: str, *, now: datetime | None = None) 
     return found
 
 
-SendFn = Callable[[str, str], bool | None]
+def flush_app_open_reminders(
+    daily_root: Path,
+    user_id: str,
+    send: SendFn,
+) -> int:
+    """Deliver reminders queued for the next app open for one user."""
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(user_id))
+    path = Path(daily_root) / "users" / (safe or "local") / "reminders.json"
+    if not path.is_file():
+        return 0
+    delivered = 0
+    for uid, rem_path, item in due_reminders(daily_root, include_app_open=True):
+        if uid != safe and uid != str(user_id):
+            continue
+        text = str(item.get("text") or "(reminder)")
+        body = f"Reminder (on open)\n{text}"
+        try:
+            ok = send(str(user_id), body)
+            if ok is False:
+                continue
+            mark_notified(rem_path, str(item.get("id")))
+            delivered += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return delivered
 
 
 class ReminderNotifier:
