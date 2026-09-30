@@ -211,6 +211,14 @@ def confirmation_message_for(
     name = tool_name or getattr(func, "__name__", "")
     if name == "manage_process" and str(arguments.get("action") or "check").lower() == "kill":
         return "Kill matching OS processes? This can disrupt running applications."
+    if name == "send_email":
+        to = str(arguments.get("to") or "?").strip()
+        subject = str(arguments.get("subject") or "(no subject)").strip()
+        return f"Send email to {to!r} with subject {subject!r}?"
+    if name == "send_telegram_message":
+        to = str(arguments.get("to") or "?").strip()
+        preview = str(arguments.get("text") or "")[:120]
+        return f"Send Telegram message to {to!r}?\nPreview: {preview}"
     custom = getattr(func, ATTR_CONFIRMATION_MESSAGE, None)
     if custom:
         return custom
