@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,10 @@ def _todos_path() -> Path:
 
 def _reminders_path() -> Path:
     return _user_dir() / "reminders.json"
+
+
+def _diary_path() -> Path:
+    return _user_dir() / "diary.json"
 
 
 def _load(path: Path) -> list[dict[str, Any]]:
@@ -244,5 +248,101 @@ def list_reminders(include_done: bool = False) -> dict[str, Any]:
             "count": len(rows),
             "reminders": rows[-100:],
         }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
+def _parse_day(day: str) -> str | None:
+    text = (day or "").strip().lower()
+    if not text or text in {"today", "сейчас"}:
+        return datetime.now(timezone.utc).date().isoformat()
+    if text == "yesterday":
+        return (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    # YYYY-MM-DD
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    return None
+
+
+@tool
+def add_diary_entry(text: str, day: str = "today") -> dict[str, Any]:
+    """Write a personal diary / journal entry for a day (separate from quick notes).
+
+    Args:
+        text: Diary entry body.
+        day: ``today``, ``yesterday``, or ``YYYY-MM-DD`` (UTC date).
+
+    Returns:
+        The stored entry.
+    """
+    try:
+        body = text.strip()
+        if not body:
+            return {"ok": False, "error": "text must not be empty"}
+        date_s = _parse_day(day)
+        if not date_s:
+            return {"ok": False, "error": "day must be today, yesterday, or YYYY-MM-DD"}
+        rows = _load(_diary_path())
+        entry = {
+            "id": uuid.uuid4().hex[:10],
+            "date": date_s,
+            "text": body,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "user_id": get_user_id(),
+        }
+        rows.append(entry)
+        _save(_diary_path(), rows[-1000:])
+        return {"ok": True, "entry": entry}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
+@tool
+def list_diary(days: int = 14, query: str = "") -> dict[str, Any]:
+    """List recent diary entries (newest first). Optional text filter.
+
+    Notes (add_note) are short sticky facts; diary is dated journal writing.
+
+    Args:
+        days: Only include entries from the last N days (1–365, default 14).
+        query: Optional case-insensitive substring filter.
+
+    Returns:
+        Matching diary entries.
+    """
+    try:
+        window = max(1, min(int(days or 14), 365))
+        cutoff = (datetime.now(timezone.utc).date() - timedelta(days=window - 1)).isoformat()
+        rows = list(reversed(_load(_diary_path())))
+        rows = [e for e in rows if str(e.get("date") or "") >= cutoff]
+        q = query.strip().lower()
+        if q:
+            rows = [e for e in rows if q in str(e.get("text") or "").lower()]
+        return {
+            "ok": True,
+            "user_id": get_user_id(),
+            "count": len(rows[:100]),
+            "entries": rows[:100],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
+@tool
+def get_diary_day(day: str = "today") -> dict[str, Any]:
+    """Get all diary entries for one day.
+
+    Args:
+        day: ``today``, ``yesterday``, or ``YYYY-MM-DD``.
+
+    Returns:
+        Entries for that date.
+    """
+    try:
+        date_s = _parse_day(day)
+        if not date_s:
+            return {"ok": False, "error": "day must be today, yesterday, or YYYY-MM-DD"}
+        rows = [e for e in _load(_diary_path()) if e.get("date") == date_s]
+        return {"ok": True, "date": date_s, "count": len(rows), "entries": rows}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}

@@ -20,6 +20,7 @@ from core.confirmation import (
 )
 from core.context import request_context
 from core.devices import Device, DeviceRegistry, execute_remote_tool
+from core.memory import MemoryStore
 from core.permissions import PermissionPolicy, Role, check_tool_permission
 from core.registry import ToolRegistry
 from core.safety import check_shell_command
@@ -32,10 +33,12 @@ Users talk from the web app (phone/PC); legacy Telegram CLI also exists.
 Each person can use their own AI API key.
 
 Capabilities:
-- Local: notes, todos, reminders, files, desktop notify, open URL, shell (confirmed).
-- Internet: web_search for facts, then fetch_url to read promising pages. Do not invent live data.
-- Messaging: list/add contacts; send_email or send_telegram_message only to known contacts \
-(or explicit addresses). Outbound messages always require the user to Allow in the app.
+- Memory: remember lasting facts (preferences, people, routines). Use remember/recall_memory.
+- Notes = short sticky items; Diary = dated journal (add_diary_entry / list_diary).
+- Calendar: local hub calendar (add_calendar_event / list_calendar_events).
+- Todos & reminders on this hub.
+- Internet: web_search then fetch_url. Do not invent live data.
+- Messaging: contacts + send_email / send_telegram_message (always needs Allow).
 
 Be concise and honest about failures. Never invent tool results.
 Prefer short replies that read well on a phone.
@@ -63,7 +66,7 @@ AUDITED_TOOLS = frozenset(
     }
 )
 
-# Always execute on the hub (SMTP/search keys live here), even if a remote PC is active.
+# Always execute on the hub (SMTP/search/memory live here), even if a remote PC is active.
 HUB_LOCAL_TOOLS = frozenset(
     {
         "web_search",
@@ -73,6 +76,23 @@ HUB_LOCAL_TOOLS = frozenset(
         "remove_contact",
         "send_email",
         "send_telegram_message",
+        "remember",
+        "list_memory",
+        "recall_memory",
+        "forget_memory",
+        "add_diary_entry",
+        "list_diary",
+        "get_diary_day",
+        "add_calendar_event",
+        "list_calendar_events",
+        "cancel_calendar_event",
+        "add_note",
+        "list_notes",
+        "add_todo",
+        "list_todos",
+        "complete_todo",
+        "set_reminder",
+        "list_reminders",
     }
 )
 
@@ -111,21 +131,36 @@ class Agent:
         self.devices = devices
         self.active_device_id = active_device_id
 
-        role_note = f"\nActive role: {self.role.value}."
-        if self.role == Role.FRIEND:
-            role_note += " Friend operators have a restricted tool set."
-        device = self._resolve_device()
-        if device:
-            role_note += f"\nActive device: {device.id} ({device.name})."
-
         self._messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT + role_note},
+            {"role": "system", "content": self._system_content()},
         ]
 
         if client is not None:
             self.client = client
         else:
             self.client = self._build_client()
+
+    def _system_content(self) -> str:
+        role_note = f"\nActive role: {self.role.value}."
+        if self.role == Role.FRIEND:
+            role_note += " Friend operators have a restricted tool set."
+        device = self._resolve_device()
+        if device:
+            role_note += f"\nActive device: {device.id} ({device.name})."
+        block = SYSTEM_PROMPT + role_note
+        try:
+            memory = MemoryStore(self.settings.data_dir / "memory").prompt_block(
+                str(self.requester_id)
+            )
+            if memory:
+                block += "\n\n" + memory
+        except Exception:  # noqa: BLE001
+            pass
+        return block
+
+    def _refresh_system_prompt(self) -> None:
+        if self._messages and self._messages[0].get("role") == "system":
+            self._messages[0] = {"role": "system", "content": self._system_content()}
 
     def _build_client(self) -> OpenAI | None:
         api_key = None
@@ -158,8 +193,7 @@ class Agent:
         return self.client is not None and len(self.registry) > 0
 
     def reset(self) -> None:
-        first = self._messages[0]
-        self._messages = [first]
+        self._messages = [{"role": "system", "content": self._system_content()}]
 
     def seed_from_transcript(self, turns: list[dict[str, str]]) -> None:
         """Restore recent user/assistant turns (no tool calls) into the LLM context."""
@@ -171,6 +205,7 @@ class Agent:
                 self._messages.append({"role": role, "content": content})
 
     def run(self, user_command: str, *, max_tool_rounds: int = 8) -> str:
+        self._refresh_system_prompt()
         if self.client is None:
             return (
                 "No AI API key configured for this user.\n"

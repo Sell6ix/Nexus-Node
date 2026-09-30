@@ -28,6 +28,7 @@ from smoke_secrets import (  # noqa: E402, F401
 )
 from core.chat_history import ChatHistory
 from core.contacts import ContactStore
+from core.memory import MemoryStore
 from core.tls import ensure_dev_cert
 from tools.desktop_tools import _windows_toast_script, _xml_escape
 from tools.web_tools import _html_to_text
@@ -85,3 +86,32 @@ def test_html_to_text_strips_tags() -> None:
     assert "Hello" in text and "world" in text
     assert "<" not in text
     assert "script" not in text.lower() or "x" not in text
+
+
+def test_memory_store(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory")
+    f = store.add("u1", "Prefers short answers")
+    assert f["id"]
+    assert "short answers" in store.prompt_block("u1")
+    assert store.search("u1", "short")[0]["id"] == f["id"]
+    assert store.remove("u1", f["id"]) is not None
+    assert store.list("u1") == []
+
+
+def test_calendar_and_diary_tools(monkeypatch, tmp_path: Path) -> None:
+    import tools.calendar_tools as cal
+    import tools.daily_tools as daily
+    from core.context import request_context
+
+    monkeypatch.setattr(cal, "_ROOT", tmp_path / "daily")
+    monkeypatch.setattr(daily, "_ROOT", tmp_path / "daily")
+
+    with request_context(user_id="u-cal", device_id="local"):
+        ev = cal.add_calendar_event("Dentist", "tomorrow 15:00", duration_minutes=30)
+        assert ev.get("ok"), ev
+        listed = cal.list_calendar_events(days=7)
+        assert listed.get("ok") and listed.get("count") >= 1
+        diary = daily.add_diary_entry("Good day", day="today")
+        assert diary.get("ok"), diary
+        day = daily.get_diary_day("today")
+        assert day.get("count") >= 1

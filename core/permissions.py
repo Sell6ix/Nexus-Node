@@ -39,6 +39,16 @@ DEFAULT_FRIEND_ALLOW_TOOLS: frozenset[str] = frozenset(
         "list_contacts",
         "add_contact",
         "remove_contact",
+        "remember",
+        "list_memory",
+        "recall_memory",
+        "forget_memory",
+        "add_diary_entry",
+        "list_diary",
+        "get_diary_day",
+        "add_calendar_event",
+        "list_calendar_events",
+        "cancel_calendar_event",
     }
 )
 

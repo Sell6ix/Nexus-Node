@@ -731,8 +731,9 @@ function SettingsPanel({
       <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-2">
         <div className="font-medium">Assistant capabilities</div>
         <p className="text-xs text-[var(--muted)] leading-relaxed">
-          Ask in chat to search the web, read a page, or message a contact.
-          Outbound email/Telegram always asks Allow first.
+          Ask in chat to search the web, remember facts about you, write a diary
+          entry, check the calendar, or message a contact. Outbound email/Telegram
+          always asks Allow first. Notes = short sticky items; diary = dated journal.
         </p>
         <p className="text-xs text-[var(--text)]">{assistantNote || 'Loading…'}</p>
         <p className="text-xs text-[var(--muted)]">
