@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nexus Overlay</title>
+    <style>
+      :root {
+        --bg: #0b1f1c;
+        --fg: #e8f5ef;
+        --muted: #8aa89c;
+        --accent: #3ecf8e;
+        --warn: #e6b35a;
+        --hot: #e07070;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        font-family: "DM Sans", "Segoe UI", system-ui, sans-serif;
+        color: var(--fg);
+        user-select: none;
+      }
+      .hud {
+        margin: 8px;
+        padding: 10px 12px;
+        width: calc(100% - 16px);
+        min-height: calc(100% - 16px);
+        background: color-mix(in srgb, var(--bg) 92%, transparent);
+        border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+        border-radius: 14px;
+        backdrop-filter: blur(8px);
+      }
+      .brand {
+        font-weight: 800;
+        font-size: 12px;
+        letter-spacing: 0.04em;
+        color: var(--accent);
+        margin-bottom: 6px;
+      }
+      .row {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        font-variant-numeric: tabular-nums;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+      .k { color: var(--muted); }
+      .hot { color: var(--hot); font-weight: 600; }
+      .warn { color: var(--warn); font-weight: 600; }
+      .ok { color: var(--accent); }
+      .game {
+        margin-top: 8px;
+        padding-top: 6px;
+        border-top: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+        font-size: 12px;
+      }
+      .hint { margin-top: 6px; font-size: 10px; color: var(--muted); }
+      .err { color: var(--hot); font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <div class="hud">
+      <div class="brand">NEXUS · PC</div>
+      <div id="body" class="err">Connecting…</div>
+      <div class="hint">Pin this window · drag to corner · Esc closes tab</div>
+    </div>
+    <script>
+      const el = document.getElementById('body')
+      function cls(n) {
+        if (n >= 85) return 'hot'
+        if (n >= 65) return 'warn'
+        return 'ok'
+      }
+      async function tick() {
+        try {
+          const res = await fetch('/api/overlay/stats', { cache: 'no-store' })
+          if (!res.ok) throw new Error(res.statusText)
+          const d = await res.json()
+          const cpu = d.cpu_percent ?? 0
+          const mem = d.memory?.percent ?? 0
+          const disk = d.disk?.percent ?? 0
+          const games = d.games_running || []
+          const top = d.top_processes || []
+          let gameHtml = ''
+          if (games.length) {
+            const g = games[0]
+            gameHtml = `<div class="game">GAME <strong>${g.name}</strong> · CPU ${g.cpu_percent}%</div>`
+          } else if (top[0]) {
+            gameHtml = `<div class="game">TOP <strong>${top[0].name}</strong> · ${top[0].cpu_percent}%</div>`
+          } else {
+            gameHtml = `<div class="game k">No game process detected</div>`
+          }
+          el.innerHTML = `
+            <div class="row"><span class="k">${d.hostname || 'PC'}</span><span></span></div>
+            <div class="row"><span class="k">CPU</span><span class="${cls(cpu)}">${cpu}%</span></div>
+            <div class="row"><span class="k">RAM</span><span class="${cls(mem)}">${mem}% · ${d.memory?.used_gb}/${d.memory?.total_gb}G</span></div>
+            <div class="row"><span class="k">DISK</span><span class="${cls(disk)}">${disk}%</span></div>
+            ${gameHtml}
+          `
+        } catch (e) {
+          el.innerHTML = `<div class="err">Offline — is the hub running?<br>${e.message || e}</div>`
+        }
+      }
+      tick()
+      setInterval(tick, 2000)
+      window.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') window.close()
+      })
+    </script>
+  </body>
+</html>

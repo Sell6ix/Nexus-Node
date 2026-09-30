@@ -293,7 +293,15 @@ def create_app(
             "urls": hub_urls(host, port, scheme=scheme),
             "push": True,
             "tls": tls,
+            "overlay": "/overlay.html",
         }
+
+    @app.get("/api/overlay/stats")
+    def overlay_stats() -> dict[str, Any]:
+        """Read-only hub PC metrics for the corner HUD (no auth — LAN/Tailscale trust)."""
+        from core.overlay_stats import collect_overlay_stats
+
+        return collect_overlay_stats()
 
     @app.post("/api/auth/register")
     def register(body: RegisterBody) -> dict[str, Any]:

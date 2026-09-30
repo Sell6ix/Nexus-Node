@@ -175,6 +175,16 @@ def test_maps_links() -> None:
     assert "maps.apple.com" in links["apple_maps"]
 
 
+def test_overlay_stats() -> None:
+    from core.overlay_stats import collect_overlay_stats
+
+    data = collect_overlay_stats()
+    assert data["ok"] is True
+    assert "cpu_percent" in data
+    assert "memory" in data
+    assert isinstance(data.get("top_processes"), list)
+
+
 def test_set_alarm(tmp_path: Path) -> None:
     from datetime import datetime, timedelta, timezone
 

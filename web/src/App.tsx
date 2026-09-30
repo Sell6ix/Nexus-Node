@@ -1142,6 +1142,31 @@ function DevicesPanel({
         Active: <span className="text-[var(--text)]">{active}</span>
         {home ? ` · Home: ${home}` : ''}
       </p>
+
+      <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-2">
+        <div className="font-medium">PC stats overlay</div>
+        <p className="text-xs text-[var(--muted)]">
+          Corner HUD on the hub PC: CPU, RAM, disk, detected games. Or open the web
+          overlay in a small window.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] font-semibold px-4 py-2 text-sm"
+            onClick={() => {
+              window.open('/overlay.html', 'nexus-overlay', 'popup=yes,width=260,height=220')
+              onToast('Overlay opened — pin / always-on-top if you want')
+            }}
+          >
+            Open web HUD
+          </button>
+        </div>
+        <p className="text-xs text-[var(--muted)]">
+          Native always-on-top on the hub PC: chat «открой оверлей» or{' '}
+          <code className="text-[var(--accent)]">./scripts/open-overlay.sh</code>
+        </p>
+      </div>
+
       <ul className="space-y-2">
         {devices.map((d) => (
           <li

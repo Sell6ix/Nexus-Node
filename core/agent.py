@@ -41,6 +41,7 @@ Capabilities:
 - whats_next + plan_route for next calendar event, ETA, leave-by, Maps links.
   set_home_location for the usual start point (default Tel Aviv).
 - set_alarm for wake-ups (local Asia/Jerusalem times); speaks on the phone.
+- open_stats_overlay / get_overlay_stats — corner HUD on the hub PC (CPU/RAM/games).
 - summarize_url for shared links / YouTube page text (then summarize in bullets).
 - sync_calendars to pull/push between local hub calendar and Google.
 - Multiple chat threads in the web UI (home / work / etc.).

@@ -17,6 +17,8 @@ class Role(str, Enum):
 DEFAULT_FRIEND_ALLOW_TOOLS: frozenset[str] = frozenset(
     {
         "get_system_stats",
+        "get_overlay_stats",
+        "open_stats_overlay",
         "check_game_running",
         "manage_process",  # kill blocked separately
         "list_directory",
