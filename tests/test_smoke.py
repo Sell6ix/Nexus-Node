@@ -174,6 +174,74 @@ def test_upload_read_is_bounded() -> None:
     assert upload.requested == 11
 
 
+def test_upload_request_body_limit() -> None:
+    import asyncio
+
+    from core.web_hub import UploadRequestLimitMiddleware
+
+    called = False
+    messages = [
+        {"type": "http.request", "body": b"123", "more_body": True},
+        {"type": "http.request", "body": b"456", "more_body": False},
+    ]
+    sent = []
+
+    async def downstream(scope, receive, send) -> None:
+        nonlocal called
+        called = True
+
+    async def receive():
+        return messages.pop(0)
+
+    async def send(message) -> None:
+        sent.append(message)
+
+    middleware = UploadRequestLimitMiddleware(downstream)
+    middleware.max_body_by_path["/api/uploads"] = 5
+    asyncio.run(
+        middleware(
+            {"type": "http", "method": "POST", "path": "/api/uploads", "headers": []},
+            receive,
+            send,
+        )
+    )
+    assert not called
+    assert sent[0]["status"] == 413
+
+
+def test_login_rate_limit(monkeypatch, tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from core.config import load_settings
+    from core.registry import ToolRegistry
+    from core.web_hub import create_app
+
+    monkeypatch.setenv("NEXUS_DATA_DIR", str(tmp_path / "data"))
+    app = create_app(load_settings(), ToolRegistry())
+    with TestClient(app) as client:
+        client.post(
+            "/api/auth/register",
+            json={"username": "login-owner", "password": "password1"},
+        )
+        for _ in range(5):
+            response = client.post(
+                "/api/auth/login",
+                json={"username": "login-owner", "password": "wrong-pass"},
+            )
+            assert response.status_code == 401
+        response = client.post(
+            "/api/auth/login",
+            json={"username": "login-owner", "password": "wrong-pass"},
+        )
+        assert response.status_code == 429
+        assert int(response.headers["retry-after"]) > 0
+        blocked = client.post(
+            "/api/auth/login",
+            json={"username": "login-owner", "password": "password1"},
+        )
+        assert blocked.status_code == 429
+
+
 def test_websocket_ticket_is_single_use(monkeypatch, tmp_path: Path) -> None:
     import pytest
     from fastapi.testclient import TestClient

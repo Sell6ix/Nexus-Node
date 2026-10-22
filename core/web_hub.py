@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import secrets
 import threading
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import jwt
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -132,6 +134,97 @@ class ContactBody(BaseModel):
     id: str | None = None
 
 
+class UploadRequestLimitMiddleware:
+    def __init__(self, app: Any) -> None:
+        self.app = app
+        self.max_body_by_path = {
+            "/api/uploads": MAX_UPLOAD_BYTES + 1024 * 1024,
+            "/api/voice/transcribe": 25 * 1024 * 1024 + 1024 * 1024,
+        }
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http" or scope.get("method") != "POST":
+            await self.app(scope, receive, send)
+            return
+        limit = self.max_body_by_path.get(scope.get("path", ""))
+        if limit is None:
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers") or [])
+        content_length = headers.get(b"content-length")
+        if content_length:
+            try:
+                too_large = int(content_length) > limit
+            except ValueError:
+                too_large = False
+            if too_large:
+                await self._reject(send)
+                return
+
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            body.extend(message.get("body", b""))
+            if len(body) > limit:
+                await self._reject(send)
+                return
+            if not message.get("more_body", False):
+                break
+
+        delivered = False
+
+        async def replay_body() -> dict[str, Any]:
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+            return await receive()
+
+        await self.app(scope, replay_body, send)
+
+    @staticmethod
+    async def _reject(send: Any) -> None:
+        body = b'{"detail":"Request body too large"}'
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+class LoginRateLimiter:
+    def __init__(self, *, max_attempts: int = 5, window_seconds: int = 900) -> None:
+        self.max_attempts = max_attempts
+        self.window_seconds = window_seconds
+        self._attempts: dict[str, deque[float]] = {}
+        self._lock = threading.Lock()
+
+    def check_and_record(self, key: str) -> int:
+        now = time.monotonic()
+        with self._lock:
+            attempts = self._attempts.setdefault(key, deque())
+            cutoff = now - self.window_seconds
+            while attempts and attempts[0] <= cutoff:
+                attempts.popleft()
+            if len(attempts) >= self.max_attempts:
+                return max(1, math.ceil(attempts[0] + self.window_seconds - now))
+            attempts.append(now)
+            return 0
+
+    def clear(self, key: str) -> None:
+        with self._lock:
+            self._attempts.pop(key, None)
+
+
 async def _read_limited_upload(file: UploadFile, max_bytes: int, message: str) -> bytes:
     data = await file.read(max_bytes + 1)
     if len(data) > max_bytes:
@@ -204,6 +297,8 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(UploadRequestLimitMiddleware)
+    login_limiter = LoginRateLimiter()
 
     def _agent_key(user_id: str, conversation_id: str = "main") -> str:
         cid = (conversation_id or "main").strip() or "main"
@@ -332,10 +427,19 @@ def create_app(
         return {"token": _token_for(acc), "user": acc.public_dict()}
 
     @app.post("/api/auth/login")
-    def login(body: LoginBody) -> dict[str, Any]:
+    def login(body: LoginBody, request: Request) -> dict[str, Any]:
+        client_key = request.client.host if request.client else "unknown"
+        retry_after = login_limiter.check_and_record(client_key)
+        if retry_after:
+            raise HTTPException(
+                429,
+                "Too many failed login attempts. Try again later.",
+                headers={"Retry-After": str(retry_after)},
+            )
         acc = accounts.authenticate(body.username, body.password)
         if acc is None:
             raise HTTPException(401, "Invalid username or password")
+        login_limiter.clear(client_key)
         audit.log("web_login", user=acc.username)
         return {"token": _token_for(acc), "user": acc.public_dict()}
 
