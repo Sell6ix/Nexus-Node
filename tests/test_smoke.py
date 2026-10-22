@@ -118,6 +118,94 @@ def test_device_registry_access_control(tmp_path: Path) -> None:
     assert store.get("alice-pc").name == "Alice PC"
 
 
+def test_account_registration_is_atomic(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from core.accounts import AccountStore
+
+    store = AccountStore(tmp_path / "accounts.json")
+
+    def register_owner(username: str):
+        try:
+            return store.register(username, "password1")
+        except ValueError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        owners = list(pool.map(register_owner, ("owner-one", "owner-two")))
+    assert sum(account is not None and account.role == "owner" for account in owners) == 1
+
+    owner = next(account for account in owners if account is not None)
+    invite = store.create_invite(owner.id)
+
+    def register_with_invite(username: str) -> bool:
+        try:
+            store.register(username, "password1", invite_code=invite.code)
+            return True
+        except ValueError:
+            return False
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        used = list(pool.map(register_with_invite, ("member-one", "member-two")))
+    assert sum(used) == 1
+
+
+def test_upload_read_is_bounded() -> None:
+    import asyncio
+
+    import pytest
+    from fastapi import HTTPException
+
+    from core.web_hub import _read_limited_upload
+
+    class Upload:
+        def __init__(self, data: bytes) -> None:
+            self.data = data
+            self.requested = 0
+
+        async def read(self, size: int = -1) -> bytes:
+            self.requested = size
+            return self.data[:size]
+
+    upload = Upload(b"x" * 11)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(_read_limited_upload(upload, 10, "too large"))
+    assert exc.value.status_code == 413
+    assert upload.requested == 11
+
+
+def test_websocket_ticket_is_single_use(monkeypatch, tmp_path: Path) -> None:
+    import pytest
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    from core.config import load_settings
+    from core.registry import ToolRegistry
+    from core.web_hub import create_app
+
+    monkeypatch.setenv("NEXUS_DATA_DIR", str(tmp_path / "data"))
+    app = create_app(load_settings(), ToolRegistry())
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/auth/register",
+            json={"username": "ws-owner", "password": "password1"},
+        )
+        assert response.status_code == 200
+        token = response.json()["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        ticket_response = client.post("/api/ws/ticket", headers=headers)
+        assert ticket_response.status_code == 200
+        ticket = ticket_response.json()["ticket"]
+
+        with client.websocket_connect(f"/api/ws?ticket={ticket}") as websocket:
+            assert websocket.receive_json()["type"] == "hello"
+
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(f"/api/ws?ticket={ticket}") as websocket:
+                websocket.receive_json()
+        assert exc.value.code == 4401
+
+
 def test_briefing_schedule(tmp_path: Path) -> None:
     from datetime import datetime, timezone
 

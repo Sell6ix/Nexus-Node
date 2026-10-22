@@ -240,6 +240,7 @@ export const api = {
   pushVapid: () => request<{ publicKey: string }>('/api/push/vapid'),
   pushSubscribe: (body: { endpoint: string; keys: { p256dh: string; auth: string } }) =>
     request<{ ok: boolean }>('/api/push/subscribe', { method: 'POST', body: JSON.stringify(body) }),
+  wsTicket: () => request<{ ticket: string }>('/api/ws/ticket', { method: 'POST' }),
   transcribe: (blob: Blob, lang = '') => {
     const fd = new FormData()
     const ext = blob.type.includes('mp4') ? 'mp4' : blob.type.includes('ogg') ? 'ogg' : 'webm'
@@ -249,7 +250,7 @@ export const api = {
   },
 }
 
-export function wsUrl(token: string): string {
+export function wsUrl(ticket: string): string {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  return `${proto}://${location.host}/api/ws?token=${encodeURIComponent(token)}`
+  return `${proto}://${location.host}/api/ws?ticket=${encodeURIComponent(ticket)}`
 }

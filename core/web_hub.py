@@ -6,6 +6,7 @@ import asyncio
 import os
 import secrets
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ from core.push import PushStore
 from core.registry import ToolRegistry
 from core.reminders import ReminderNotifier, flush_app_open_reminders
 from core.secrets import default_box
+from core.uploads import MAX_BYTES as MAX_UPLOAD_BYTES
 from core.uploads import UploadStore
 from core.users import UserProfile
 from core.web_confirm import WebConfirmBroker
@@ -130,6 +132,13 @@ class ContactBody(BaseModel):
     id: str | None = None
 
 
+async def _read_limited_upload(file: UploadFile, max_bytes: int, message: str) -> bytes:
+    data = await file.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise HTTPException(413, message)
+    return data
+
+
 def _account_to_profile(acc: Account) -> UserProfile:
     return UserProfile(
         chat_id=acc.id,
@@ -184,6 +193,8 @@ def create_app(
     agents_guard = threading.Lock()
     agent_locks: dict[str, threading.Lock] = {}
     agent_locks_guard = threading.Lock()
+    ws_tickets: dict[str, tuple[str, float]] = {}
+    ws_tickets_guard = threading.Lock()
 
     app = FastAPI(title="Nexus Node", version="0.3.0")
     app.add_middleware(
@@ -327,6 +338,18 @@ def create_app(
             raise HTTPException(401, "Invalid username or password")
         audit.log("web_login", user=acc.username)
         return {"token": _token_for(acc), "user": acc.public_dict()}
+
+    @app.post("/api/ws/ticket")
+    def create_ws_ticket(account: Account = Depends(require_account)) -> dict[str, str]:
+        ticket = secrets.token_urlsafe(32)
+        expires_at = time.monotonic() + 30
+        with ws_tickets_guard:
+            now = time.monotonic()
+            expired = [key for key, (_, deadline) in ws_tickets.items() if deadline <= now]
+            for key in expired:
+                del ws_tickets[key]
+            ws_tickets[ticket] = (account.id, expires_at)
+        return {"ticket": ticket}
 
     def _flush_open_reminders(account: Account) -> None:
         try:
@@ -652,7 +675,9 @@ def create_app(
     ) -> dict[str, Any]:
         from core.vision import describe_image
 
-        raw = await file.read()
+        raw = await _read_limited_upload(
+            file, MAX_UPLOAD_BYTES, "File too large (max 15MB)"
+        )
         try:
             meta = uploads.save(
                 account.id,
@@ -717,11 +742,11 @@ def create_app(
                 400,
                 "Add your AI API key in Settings to use Whisper voice.",
             )
-        raw = await file.read()
+        raw = await _read_limited_upload(
+            file, 25 * 1024 * 1024, "Audio too large (max 25MB)"
+        )
         if not raw:
             raise HTTPException(400, "Empty audio")
-        if len(raw) > 25 * 1024 * 1024:
-            raise HTTPException(400, "Audio too large (max 25MB)")
         base = (account.api_base_url or settings.openai_base_url or "https://api.openai.com/v1").rstrip(
             "/"
         )
@@ -977,14 +1002,14 @@ def create_app(
     @app.websocket("/api/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:
         await websocket.accept()
-        token = websocket.query_params.get("token") or ""
-        try:
-            data = jwt.decode(token, jwt_secret, algorithms=["HS256"])
-            account = accounts.get(str(data.get("sub") or ""))
-            if account is None:
-                await websocket.close(code=4401)
-                return
-        except jwt.PyJWTError:
+        ticket = websocket.query_params.get("ticket") or ""
+        with ws_tickets_guard:
+            ticket_data = ws_tickets.pop(ticket, None)
+        if ticket_data is None or ticket_data[1] <= time.monotonic():
+            await websocket.close(code=4401)
+            return
+        account = accounts.get(ticket_data[0])
+        if account is None or not account.enabled:
             await websocket.close(code=4401)
             return
 

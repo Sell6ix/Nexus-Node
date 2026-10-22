@@ -271,8 +271,15 @@ export default function App() {
     let ws: WebSocket | null = null
     let timer: number | undefined
 
-    const connect = () => {
-      ws = new WebSocket(wsUrl(token))
+    const connect = async () => {
+      try {
+        const { ticket } = await api.wsTicket()
+        if (!alive) return
+        ws = new WebSocket(wsUrl(ticket))
+      } catch {
+        if (alive) timer = window.setTimeout(connect, 2000)
+        return
+      }
       ws.onmessage = (ev) => {
         try {
           const data = JSON.parse(ev.data)

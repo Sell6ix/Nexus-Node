@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -94,6 +95,7 @@ class AccountStore:
         self.accounts: dict[str, Account] = {}
         self.by_username: dict[str, str] = {}
         self.invites: dict[str, Invite] = {}
+        self._state_lock = threading.RLock()
         self._load()
 
     def _load(self) -> None:
@@ -204,43 +206,44 @@ class AccountStore:
         invite_code: str | None = None,
         open_signup: bool = False,
     ) -> Account:
-        user = (username or "").strip().lower()
-        if not user or len(user) < 2:
-            raise ValueError("Username must be at least 2 characters.")
-        if not password or len(password) < 6:
-            raise ValueError("Password must be at least 6 characters.")
-        if user in self.by_username:
-            raise ValueError("Username already taken.")
+        with self._state_lock:
+            user = (username or "").strip().lower()
+            if not user or len(user) < 2:
+                raise ValueError("Username must be at least 2 characters.")
+            if not password or len(password) < 6:
+                raise ValueError("Password must be at least 6 characters.")
+            if user in self.by_username:
+                raise ValueError("Username already taken.")
 
-        role: RoleName = "member"
-        invite: Invite | None = None
-        if not self.has_owner:
-            role = "owner"
-        elif invite_code:
-            invite = self.invites.get(invite_code.strip())
-            if invite is None or not invite.is_valid():
-                raise ValueError("Invalid or expired invite code.")
-            if self.count_members() >= self.max_members:
-                raise ValueError("Member limit reached.")
-        elif open_signup:
-            if self.count_members() >= self.max_members:
-                raise ValueError("Member limit reached.")
-        else:
-            raise ValueError("Registration requires an invite code from the owner.")
+            role: RoleName = "member"
+            invite: Invite | None = None
+            if not self.has_owner:
+                role = "owner"
+            elif invite_code:
+                invite = self.invites.get(invite_code.strip())
+                if invite is None or not invite.is_valid():
+                    raise ValueError("Invalid or expired invite code.")
+                if self.count_members() >= self.max_members:
+                    raise ValueError("Member limit reached.")
+            elif open_signup:
+                if self.count_members() >= self.max_members:
+                    raise ValueError("Member limit reached.")
+            else:
+                raise ValueError("Registration requires an invite code from the owner.")
 
-        acc = Account(
-            id=uuid.uuid4().hex[:12],
-            username=user,
-            password_hash=self.hash_password(password),
-            role=role,
-            display_name=(display_name or user).strip(),
-        )
-        self.accounts[acc.id] = acc
-        self.by_username[user] = acc.id
-        if invite is not None:
-            invite.used_by = acc.id
-        self._save()
-        return acc
+            acc = Account(
+                id=uuid.uuid4().hex[:12],
+                username=user,
+                password_hash=self.hash_password(password),
+                role=role,
+                display_name=(display_name or user).strip(),
+            )
+            self.accounts[acc.id] = acc
+            self.by_username[user] = acc.id
+            if invite is not None:
+                invite.used_by = acc.id
+            self._save()
+            return acc
 
     def authenticate(self, username: str, password: str) -> Account | None:
         acc = self.get_by_username(username)
@@ -251,18 +254,20 @@ class AccountStore:
         return acc
 
     def save(self, account: Account) -> None:
-        self.accounts[account.id] = account
-        self.by_username[account.username] = account.id
-        self._save()
+        with self._state_lock:
+            self.accounts[account.id] = account
+            self.by_username[account.username] = account.id
+            self._save()
 
     def create_invite(self, created_by: str, *, label: str = "", ttl_hours: float = 24.0) -> Invite:
-        code = secrets.token_urlsafe(8)
-        inv = Invite(
-            code=code,
-            created_by=created_by,
-            label=label.strip(),
-            expires_at=time.time() + ttl_hours * 3600,
-        )
-        self.invites[code] = inv
-        self._save()
-        return inv
+        with self._state_lock:
+            code = secrets.token_urlsafe(8)
+            inv = Invite(
+                code=code,
+                created_by=created_by,
+                label=label.strip(),
+                expires_at=time.time() + ttl_hours * 3600,
+            )
+            self.invites[code] = inv
+            self._save()
+            return inv
