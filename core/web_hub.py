@@ -347,6 +347,20 @@ def create_app(
     def patch_me(
         body: ProfilePatch, account: Account = Depends(require_account)
     ) -> dict[str, Any]:
+        is_owner = account.role == "owner"
+        selections = (
+            (body.active_device_id, body.clear_active_device),
+            (body.home_device_id, body.clear_home_device),
+        )
+        for device_id, clearing in selections:
+            if clearing:
+                continue
+            selected_id = (device_id or "").strip()
+            if selected_id and not devices.can_access(
+                selected_id, user_id=account.id, is_owner=is_owner
+            ):
+                raise HTTPException(403, "Device not available to this account")
+
         if body.clear_api_key:
             account.api_key = None
         elif body.api_key is not None:
@@ -396,14 +410,21 @@ def create_app(
     def add_device(
         body: DeviceBody, account: Account = Depends(require_account)
     ) -> dict[str, Any]:
-        devices.upsert(
-            body.id.strip(),
-            name=body.name.strip() or body.id,
-            base_url=body.base_url.strip(),
-            token=body.token.strip(),
-            owner_chat_id=account.id,
-        )
-        return {"ok": True, "id": body.id.strip()}
+        device_id = body.id.strip()
+        if not device_id:
+            raise HTTPException(400, "Device ID is required")
+        try:
+            devices.upsert_for_user(
+                device_id,
+                name=body.name.strip() or device_id,
+                base_url=body.base_url.strip(),
+                token=body.token.strip(),
+                user_id=account.id,
+                is_owner=account.role == "owner",
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        return {"ok": True, "id": device_id}
 
     @app.delete("/api/devices/{device_id}")
     def del_device(
@@ -424,6 +445,10 @@ def create_app(
         dev = devices.get(device_id)
         if dev is None:
             raise HTTPException(404, "Not found")
+        if not devices.can_access(
+            device_id, user_id=account.id, is_owner=account.role == "owner"
+        ):
+            raise HTTPException(403, "Device not available to this account")
         return ping_device(dev)
 
     @app.post("/api/invites")

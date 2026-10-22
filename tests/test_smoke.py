@@ -85,6 +85,39 @@ def test_chat_conversations(tmp_path: Path) -> None:
     assert work["id"] not in {c["id"] for c in store.list_conversations("u1")}
 
 
+def test_device_registry_access_control(tmp_path: Path) -> None:
+    import pytest
+
+    from core.devices import DeviceRegistry
+
+    store = DeviceRegistry(tmp_path / "devices.json", local_id="hub", local_name="Hub")
+    store.upsert(
+        "alice-pc",
+        name="Alice PC",
+        base_url="http://alice",
+        token="alice-token",
+        owner_chat_id="alice",
+    )
+    assert store.can_access("hub", user_id="bob", is_owner=False)
+    assert store.can_access("alice-pc", user_id="alice", is_owner=False)
+    assert not store.can_access("alice-pc", user_id="bob", is_owner=False)
+    assert store.can_access("alice-pc", user_id="bob", is_owner=True)
+    assert not store.can_manage("hub", user_id="alice", is_owner=True)
+    assert not store.can_manage("alice-pc", user_id="bob", is_owner=False)
+    assert store.can_manage("alice-pc", user_id="alice", is_owner=False)
+    assert store.can_manage("bob-pc", user_id="bob", is_owner=False)
+    with pytest.raises(PermissionError):
+        store.upsert_for_user(
+            "alice-pc",
+            name="Hijacked",
+            base_url="http://attacker",
+            token="attacker-token",
+            user_id="bob",
+            is_owner=False,
+        )
+    assert store.get("alice-pc").name == "Alice PC"
+
+
 def test_briefing_schedule(tmp_path: Path) -> None:
     from datetime import datetime, timezone
 

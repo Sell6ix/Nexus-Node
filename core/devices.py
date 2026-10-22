@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -31,6 +32,7 @@ class DeviceRegistry:
     local_name: str
     local_token: str | None = None
     devices: dict[str, Device] = field(default_factory=dict)
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.path = Path(self.path)
@@ -95,42 +97,82 @@ class DeviceRegistry:
         owner_chat_id: str | None = None,
         enabled: bool = True,
     ) -> Device:
-        existing = self.devices.get(device_id)
-        dev = Device(
-            id=device_id,
-            name=name or (existing.name if existing else device_id),
-            base_url=base_url if base_url is not None else (existing.base_url if existing else None),
-            token=token if token is not None else (existing.token if existing else None),
-            owner_chat_id=owner_chat_id
-            if owner_chat_id is not None
-            else (existing.owner_chat_id if existing else None),
-            enabled=enabled,
-        )
-        self.devices[device_id] = dev
-        self._save()
-        return dev
+        with self._lock:
+            existing = self.devices.get(device_id)
+            dev = Device(
+                id=device_id,
+                name=name or (existing.name if existing else device_id),
+                base_url=base_url if base_url is not None else (existing.base_url if existing else None),
+                token=token if token is not None else (existing.token if existing else None),
+                owner_chat_id=owner_chat_id
+                if owner_chat_id is not None
+                else (existing.owner_chat_id if existing else None),
+                enabled=enabled,
+            )
+            self.devices[device_id] = dev
+            self._save()
+            return dev
+
+    def upsert_for_user(
+        self,
+        device_id: str,
+        *,
+        name: str,
+        base_url: str,
+        token: str,
+        user_id: str,
+        is_owner: bool,
+    ) -> Device:
+        with self._lock:
+            if not self.can_manage(device_id, user_id=user_id, is_owner=is_owner):
+                raise PermissionError("Cannot modify this device")
+            return self.upsert(
+                device_id,
+                name=name,
+                base_url=base_url,
+                token=token,
+                owner_chat_id=user_id,
+            )
 
     def remove(self, device_id: str) -> bool:
-        if device_id == self.local_id:
-            return False
-        if device_id not in self.devices:
-            return False
-        del self.devices[device_id]
-        self._save()
-        return True
+        with self._lock:
+            if device_id == self.local_id:
+                return False
+            if device_id not in self.devices:
+                return False
+            del self.devices[device_id]
+            self._save()
+            return True
 
     def visible_to(self, chat_id: int | str, *, is_owner: bool) -> list[Device]:
         """Owner sees all; others only unowned or devices they own."""
         key = str(chat_id)
         out: list[Device] = []
         for dev in self.list_devices():
-            if not dev.enabled:
-                continue
-            if is_owner:
-                out.append(dev)
-            elif not dev.owner_chat_id or str(dev.owner_chat_id) == key:
+            if self.can_access(dev.id, user_id=key, is_owner=is_owner):
                 out.append(dev)
         return out
+
+    def can_access(self, device_id: str, *, user_id: str, is_owner: bool) -> bool:
+        """Whether an account may select or inspect a device."""
+        device = self.get(device_id)
+        if device is None or not device.enabled:
+            return False
+        return (
+            device.is_local
+            or is_owner
+            or not device.owner_chat_id
+            or str(device.owner_chat_id) == str(user_id)
+        )
+
+    def can_manage(self, device_id: str, *, user_id: str, is_owner: bool) -> bool:
+        """Whether an account may create or update a device without taking it over."""
+        if device_id == self.local_id:
+            return False
+        existing = self.get(device_id)
+        if existing is None:
+            return True
+        return is_owner or str(existing.owner_chat_id or "") == str(user_id)
 
 
 def execute_remote_tool(
