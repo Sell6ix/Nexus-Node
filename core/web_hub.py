@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import math
+import hashlib
+import json
 import os
 import secrets
 import threading
 import time
-from collections import deque
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from typing import Any
 import jwt
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -141,6 +143,7 @@ class UploadRequestLimitMiddleware:
             "/api/uploads": MAX_UPLOAD_BYTES + 1024 * 1024,
             "/api/voice/transcribe": 25 * 1024 * 1024 + 1024 * 1024,
         }
+        self._active_requests = threading.BoundedSemaphore(2)
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] != "http" or scope.get("method") != "POST":
@@ -151,47 +154,59 @@ class UploadRequestLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
+        if not self._active_requests.acquire(blocking=False):
+            await self._reject(send, 503, "Upload capacity reached; try again shortly")
+            return
+
+        response_started = False
+
+        async def track_response(message: dict[str, Any]) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
         headers = dict(scope.get("headers") or [])
         content_length = headers.get(b"content-length")
-        if content_length:
+        try:
+            if content_length:
+                try:
+                    too_large = int(content_length) > limit
+                except ValueError:
+                    too_large = False
+                if too_large:
+                    await self._reject(track_response)
+                    return
+
+            bytes_read = 0
+
+            async def limited_receive() -> dict[str, Any]:
+                nonlocal bytes_read
+                message = await receive()
+                if message["type"] == "http.request":
+                    bytes_read += len(message.get("body", b""))
+                    if bytes_read > limit:
+                        raise RequestBodyTooLarge
+                return message
+
             try:
-                too_large = int(content_length) > limit
-            except ValueError:
-                too_large = False
-            if too_large:
-                await self._reject(send)
-                return
-
-        body = bytearray()
-        while True:
-            message = await receive()
-            if message["type"] == "http.disconnect":
-                return
-            body.extend(message.get("body", b""))
-            if len(body) > limit:
-                await self._reject(send)
-                return
-            if not message.get("more_body", False):
-                break
-
-        delivered = False
-
-        async def replay_body() -> dict[str, Any]:
-            nonlocal delivered
-            if not delivered:
-                delivered = True
-                return {"type": "http.request", "body": bytes(body), "more_body": False}
-            return await receive()
-
-        await self.app(scope, replay_body, send)
+                await self.app(scope, limited_receive, track_response)
+            except RequestBodyTooLarge:
+                if response_started:
+                    raise
+                await self._reject(track_response)
+        finally:
+            self._active_requests.release()
 
     @staticmethod
-    async def _reject(send: Any) -> None:
-        body = b'{"detail":"Request body too large"}'
+    async def _reject(
+        send: Any, status: int = 413, detail: str = "Request body too large"
+    ) -> None:
+        body = json.dumps({"detail": detail}).encode("utf-8")
         await send(
             {
                 "type": "http.response.start",
-                "status": 413,
+                "status": status,
                 "headers": [
                     (b"content-type", b"application/json"),
                     (b"content-length", str(len(body)).encode("ascii")),
@@ -201,28 +216,66 @@ class UploadRequestLimitMiddleware:
         await send({"type": "http.response.body", "body": body})
 
 
-class LoginRateLimiter:
-    def __init__(self, *, max_attempts: int = 5, window_seconds: int = 900) -> None:
-        self.max_attempts = max_attempts
+class RequestBodyTooLarge(Exception):
+    pass
+
+
+class LoginFailureThrottle:
+    def __init__(
+        self,
+        *,
+        window_seconds: int = 900,
+        max_entries: int = 4096,
+        base_delay: float = 0.25,
+        max_delay: float = 8.0,
+    ) -> None:
+        if (
+            window_seconds < 1
+            or max_entries < 1
+            or base_delay <= 0
+            or max_delay < base_delay
+        ):
+            raise ValueError("Login failure throttle limits must be positive")
         self.window_seconds = window_seconds
-        self._attempts: dict[str, deque[float]] = {}
+        self.max_entries = max_entries
+        self.base_delay = base_delay
+        self.max_delay = max_delay
+        self._max_count = 1
+        while base_delay * (2 ** (self._max_count - 1)) < max_delay:
+            self._max_count += 1
+        self._hash_key = secrets.token_bytes(32)
+        self._attempts: OrderedDict[str, tuple[int, float]] = OrderedDict()
         self._lock = threading.Lock()
 
-    def check_and_record(self, key: str) -> int:
+    def _identity(self, key: str) -> str:
+        return hashlib.blake2b(
+            key.encode("utf-8"), key=self._hash_key, digest_size=8
+        ).hexdigest()
+
+    def record_failure(self, key: str) -> float:
         now = time.monotonic()
+        identity = self._identity(key)
         with self._lock:
-            attempts = self._attempts.setdefault(key, deque())
-            cutoff = now - self.window_seconds
-            while attempts and attempts[0] <= cutoff:
-                attempts.popleft()
-            if len(attempts) >= self.max_attempts:
-                return max(1, math.ceil(attempts[0] + self.window_seconds - now))
-            attempts.append(now)
-            return 0
+            previous = self._attempts.get(identity)
+            count = (
+                min(previous[0] + 1, self._max_count)
+                if previous and now - previous[1] < self.window_seconds
+                else 1
+            )
+            self._attempts[identity] = (count, now)
+            self._attempts.move_to_end(identity)
+            while len(self._attempts) > self.max_entries:
+                self._attempts.popitem(last=False)
+        return min(self.max_delay, self.base_delay * (2 ** (count - 1)))
 
     def clear(self, key: str) -> None:
         with self._lock:
-            self._attempts.pop(key, None)
+            self._attempts.pop(self._identity(key), None)
+
+
+def _login_limiter_key(client_ip: str, username: str) -> str:
+    normalized_username = (username or "").strip().lower()
+    return hashlib.sha256(f"{client_ip}\0{normalized_username}".encode("utf-8")).hexdigest()
 
 
 async def _read_limited_upload(file: UploadFile, max_bytes: int, message: str) -> bytes:
@@ -298,7 +351,7 @@ def create_app(
         allow_headers=["*"],
     )
     app.add_middleware(UploadRequestLimitMiddleware)
-    login_limiter = LoginRateLimiter()
+    login_limiter = LoginFailureThrottle()
 
     def _agent_key(user_id: str, conversation_id: str = "main") -> str:
         cid = (conversation_id or "main").strip() or "main"
@@ -427,17 +480,12 @@ def create_app(
         return {"token": _token_for(acc), "user": acc.public_dict()}
 
     @app.post("/api/auth/login")
-    def login(body: LoginBody, request: Request) -> dict[str, Any]:
-        client_key = request.client.host if request.client else "unknown"
-        retry_after = login_limiter.check_and_record(client_key)
-        if retry_after:
-            raise HTTPException(
-                429,
-                "Too many failed login attempts. Try again later.",
-                headers={"Retry-After": str(retry_after)},
-            )
-        acc = accounts.authenticate(body.username, body.password)
+    async def login(body: LoginBody, request: Request) -> dict[str, Any]:
+        client_ip = request.client.host if request.client else "unknown"
+        client_key = _login_limiter_key(client_ip, body.username)
+        acc = await run_in_threadpool(accounts.authenticate, body.username, body.password)
         if acc is None:
+            await asyncio.sleep(login_limiter.record_failure(client_key))
             raise HTTPException(401, "Invalid username or password")
         login_limiter.clear(client_key)
         audit.log("web_login", user=acc.username)

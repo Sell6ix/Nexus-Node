@@ -179,16 +179,19 @@ def test_upload_request_body_limit() -> None:
 
     from core.web_hub import UploadRequestLimitMiddleware
 
-    called = False
+    received = bytearray()
     messages = [
         {"type": "http.request", "body": b"123", "more_body": True},
         {"type": "http.request", "body": b"456", "more_body": False},
     ]
     sent = []
 
-    async def downstream(scope, receive, send) -> None:
-        nonlocal called
-        called = True
+    async def downstream(scope, limited_receive, send) -> None:
+        while True:
+            message = await limited_receive()
+            received.extend(message.get("body", b""))
+            if not message.get("more_body", False):
+                break
 
     async def receive():
         return messages.pop(0)
@@ -205,23 +208,101 @@ def test_upload_request_body_limit() -> None:
             send,
         )
     )
-    assert not called
+    assert received == b"123"
     assert sent[0]["status"] == 413
 
 
-def test_login_rate_limit(monkeypatch, tmp_path: Path) -> None:
+def test_upload_request_concurrency_is_bounded() -> None:
+    import asyncio
+    import threading
+
+    from core.web_hub import UploadRequestLimitMiddleware
+
+    middleware = UploadRequestLimitMiddleware(None)
+    middleware._active_requests = threading.BoundedSemaphore(1)
+    assert middleware._active_requests.acquire(blocking=False)
+    sent = []
+
+    async def unused_receive():
+        raise AssertionError("rejected request must not read the body")
+
+    async def send(message) -> None:
+        sent.append(message)
+
+    async def unused_app(scope, receive, send) -> None:
+        raise AssertionError("request must be rejected before app dispatch")
+
+    middleware.app = unused_app
+    asyncio.run(
+        middleware(
+            {"type": "http", "method": "POST", "path": "/api/uploads", "headers": []},
+            unused_receive,
+            send,
+        )
+    )
+    middleware._active_requests.release()
+    assert sent[0]["status"] == 503
+
+
+def test_login_failure_throttle_bounds_state_and_resets(monkeypatch) -> None:
+    import core.web_hub as web_hub
+
+    limiter = web_hub.LoginFailureThrottle(
+        window_seconds=900, max_entries=2, base_delay=0.25, max_delay=1
+    )
+    now = 100.0
+    monkeypatch.setattr(web_hub.time, "monotonic", lambda: now)
+    alice = web_hub._login_limiter_key("192.0.2.1", "Alice")
+    bob = web_hub._login_limiter_key("192.0.2.1", "Bob")
+    charlie = web_hub._login_limiter_key("192.0.2.1", "Charlie")
+    assert limiter.record_failure(alice) == 0.25
+    assert limiter.record_failure(alice) == 0.5
+    assert limiter.record_failure(alice) == 1
+    assert limiter.record_failure(alice) == 1
+    limiter.clear(alice)
+    assert limiter.record_failure(alice) == 0.25
+    now += 901
+    assert limiter.record_failure(alice) == 0.25
+    limiter.record_failure(bob)
+    limiter.record_failure(charlie)
+    assert len(limiter._attempts) == 2
+
+
+def test_login_failure_throttle_normalizes_usernames() -> None:
+    from core.web_hub import LoginFailureThrottle, _login_limiter_key
+
+    limiter = LoginFailureThrottle()
+    alice = _login_limiter_key("192.0.2.1", "Alice")
+    alice_normalized = _login_limiter_key("192.0.2.1", " alice ")
+    assert alice == alice_normalized
+    assert limiter.record_failure(alice) == 0.25
+    assert limiter.record_failure(alice_normalized) == 0.5
+
+
+def test_login_failures_do_not_lock_out_valid_credentials(monkeypatch, tmp_path: Path) -> None:
     from fastapi.testclient import TestClient
 
     from core.config import load_settings
     from core.registry import ToolRegistry
-    from core.web_hub import create_app
+    from core.web_hub import LoginFailureThrottle, create_app
 
     monkeypatch.setenv("NEXUS_DATA_DIR", str(tmp_path / "data"))
-    app = create_app(load_settings(), ToolRegistry())
+    original_record_failure = LoginFailureThrottle.record_failure
+
+    def record_failure_without_wait(self, key: str) -> float:
+        original_record_failure(self, key)
+        return 0
+
+    monkeypatch.setattr(LoginFailureThrottle, "record_failure", record_failure_without_wait)
+    app = create_app(load_settings(), ToolRegistry(), open_signup=True)
     with TestClient(app) as client:
         client.post(
             "/api/auth/register",
             json={"username": "login-owner", "password": "password1"},
+        )
+        client.post(
+            "/api/auth/register",
+            json={"username": "login-member", "password": "password2"},
         )
         for _ in range(5):
             response = client.post(
@@ -229,17 +310,21 @@ def test_login_rate_limit(monkeypatch, tmp_path: Path) -> None:
                 json={"username": "login-owner", "password": "wrong-pass"},
             )
             assert response.status_code == 401
-        response = client.post(
-            "/api/auth/login",
-            json={"username": "login-owner", "password": "wrong-pass"},
-        )
-        assert response.status_code == 429
-        assert int(response.headers["retry-after"]) > 0
-        blocked = client.post(
+        valid = client.post(
             "/api/auth/login",
             json={"username": "login-owner", "password": "password1"},
         )
-        assert blocked.status_code == 429
+        assert valid.status_code == 200
+        invalid_after_success = client.post(
+            "/api/auth/login",
+            json={"username": "login-owner", "password": "wrong-pass"},
+        )
+        assert invalid_after_success.status_code == 401
+        other_user = client.post(
+            "/api/auth/login",
+            json={"username": "login-member", "password": "password2"},
+        )
+        assert other_user.status_code == 200
 
 
 def test_websocket_ticket_is_single_use(monkeypatch, tmp_path: Path) -> None:
@@ -411,6 +496,78 @@ def test_html_to_text_strips_tags() -> None:
     assert "Hello" in text and "world" in text
     assert "<" not in text
     assert "script" not in text.lower() or "x" not in text
+
+
+def test_fetch_url_rejects_non_public_destinations(monkeypatch) -> None:
+    import socket
+    import pytest
+
+    from tools.web_tools import _resolve_public_url
+
+    def resolve(host, port, *, type):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port)),
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    with pytest.raises(ValueError, match="non-public"):
+        _resolve_public_url("http://public.example/path")
+
+    for url in (
+        "file:///etc/passwd",
+        "http://user:pass@example.com/",
+        "http://example.com\\@127.0.0.1/",
+        "http://[fe80::1%25eth0]/",
+    ):
+        with pytest.raises(ValueError):
+            _resolve_public_url(url)
+
+
+def test_fetch_url_revalidates_redirect_destinations(monkeypatch) -> None:
+    import email.message
+    import urllib.error
+    import urllib.parse
+    import pytest
+
+    from tools import web_tools
+
+    calls = []
+    resolve_public_url = web_tools._resolve_public_url
+
+    def resolve_url(url):
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.hostname == "example.com":
+            return parsed, "8.8.8.8"
+        return resolve_public_url(url)
+
+    def open_public(parsed, pinned_ip, timeout):
+        calls.append(parsed.geturl())
+        headers = email.message.Message()
+        headers["Location"] = "http://127.0.0.1/internal"
+        raise urllib.error.HTTPError(
+            parsed.geturl(), 302, "Found", headers, None
+        )
+
+    monkeypatch.setattr(web_tools, "_open_pinned", open_public)
+    monkeypatch.setattr(web_tools, "_resolve_public_url", resolve_url)
+    with pytest.raises(ValueError, match="non-public"):
+        web_tools._open_public_url("http://example.com/public", timeout=1)
+    assert calls == ["http://example.com/public"]
+
+
+def test_fetch_url_returns_final_redirect_url(monkeypatch) -> None:
+    from tools import web_tools
+
+    monkeypatch.setattr(
+        web_tools,
+        "_http_text",
+        lambda url: ("<title>Final page</title><p>Content</p>", "https://example.com/final"),
+    )
+    result = web_tools.fetch_url("https://example.com/start")
+    assert result["ok"]
+    assert result["url"] == "https://example.com/final"
+    assert result["title"] == "Final page"
 
 
 def test_memory_store(tmp_path: Path) -> None:

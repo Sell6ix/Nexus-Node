@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import html
+import http.client
+import ipaddress
 import json
 import os
 import re
+import socket
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,6 +19,130 @@ from core.registry import tool
 
 _UA = "NexusNode/0.3 (+personal-assistant; https://github.com/Sell6ix/Nexus-Node)"
 _MAX_FETCH_BYTES = 1_500_000
+_MAX_REDIRECTS = 5
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, host: str, *, pinned_ip: str, **kwargs: Any) -> None:
+        super().__init__(host, **kwargs)
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection(
+            (self._pinned_ip, self.port), self.timeout, self.source_address
+        )
+
+
+class _PinnedHTTPSConnection(_PinnedHTTPConnection):
+    def __init__(self, host: str, *, pinned_ip: str, **kwargs: Any) -> None:
+        super().__init__(host, pinned_ip=pinned_ip, **kwargs)
+        self._context = ssl.create_default_context()
+
+    def connect(self) -> None:
+        super().connect()
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+def _resolve_public_url(url: str) -> tuple[urllib.parse.SplitResult, str]:
+    if any(ord(char) < 32 or ord(char) == 127 for char in url) or "\\" in url:
+        raise ValueError("Invalid URL")
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Only absolute http(s) URLs are allowed.")
+    if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+        raise ValueError("URLs containing credentials are not allowed.")
+    host = parsed.hostname
+    if not host or "%" in host:
+        raise ValueError("Invalid URL hostname.")
+    try:
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    except ValueError as exc:
+        raise ValueError("Invalid URL port.") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("Invalid URL port.")
+
+    try:
+        literal = ipaddress.ip_address(host)
+        addresses = [str(literal)]
+    except ValueError:
+        try:
+            addresses = sorted(
+                {entry[4][0] for entry in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)}
+            )
+        except (OSError, UnicodeError) as exc:
+            raise ValueError(f"Could not resolve URL hostname: {exc}") from exc
+    if not addresses:
+        raise ValueError("URL hostname resolved to no addresses.")
+
+    parsed_addresses = [ipaddress.ip_address(address) for address in addresses]
+    for address in parsed_addresses:
+        checked = address.ipv4_mapped if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped else address
+        if not checked.is_global:
+            raise ValueError("Requests to non-public IP addresses are not allowed.")
+    return parsed, str(parsed_addresses[0])
+
+
+def _open_pinned(parsed: urllib.parse.SplitResult, pinned_ip: str, timeout: float) -> Any:
+    if parsed.hostname is None:
+        raise ValueError("Invalid URL hostname.")
+    netloc = parsed.netloc
+    request = urllib.request.Request(
+        urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path or "/", parsed.query, "")),
+        headers={"User-Agent": _UA},
+        method="GET",
+    )
+
+    class PinnedHTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req: urllib.request.Request) -> Any:
+            return self.do_open(
+                lambda request_host, **kwargs: _PinnedHTTPConnection(
+                    request_host, pinned_ip=pinned_ip, **kwargs
+                ),
+                req,
+            )
+
+    class PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req: urllib.request.Request) -> Any:
+            return self.do_open(
+                lambda request_host, **kwargs: _PinnedHTTPSConnection(
+                    request_host, pinned_ip=pinned_ip, **kwargs
+                ),
+                req,
+            )
+
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        PinnedHTTPHandler(),
+        PinnedHTTPSHandler(),
+        _NoRedirect(),
+    )
+    return opener.open(request, timeout=timeout)
+
+
+def _open_public_url(url: str, *, timeout: float) -> tuple[Any, str]:
+    current_url = url
+    for redirect_count in range(_MAX_REDIRECTS + 1):
+        parsed, pinned_ip = _resolve_public_url(current_url)
+        try:
+            return _open_pinned(parsed, pinned_ip, timeout), current_url
+        except urllib.error.HTTPError as exc:
+            location = exc.headers.get("Location", "")
+            if exc.code not in {301, 302, 303, 307, 308} or not location:
+                raise
+            if redirect_count >= _MAX_REDIRECTS:
+                raise ValueError("Too many redirects.")
+            exc.close()
+            next_url = urllib.parse.urljoin(current_url, location)
+            next_scheme = urllib.parse.urlsplit(next_url).scheme.lower()
+            if parsed.scheme.lower() == "https" and next_scheme != "https":
+                raise ValueError("HTTPS redirects to non-HTTPS URLs are not allowed.")
+            current_url = next_url
+    raise ValueError("Too many redirects.")
 
 
 def _http_json(
@@ -36,9 +164,11 @@ def _http_json(
     return json.loads(raw) if raw.strip() else {}
 
 
-def _http_text(url: str, *, timeout: float = 25.0, max_bytes: int = _MAX_FETCH_BYTES) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": _UA}, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+def _http_text(
+    url: str, *, timeout: float = 25.0, max_bytes: int = _MAX_FETCH_BYTES
+) -> tuple[str, str]:
+    response, final_url = _open_public_url(url, timeout=timeout)
+    with response as resp:
         ctype = (resp.headers.get("Content-Type") or "").lower()
         data = resp.read(max_bytes + 1)
     if len(data) > max_bytes:
@@ -46,7 +176,7 @@ def _http_text(url: str, *, timeout: float = 25.0, max_bytes: int = _MAX_FETCH_B
     if "html" not in ctype and "text" not in ctype and "json" not in ctype and ctype:
         # still try decode for simple pages missing headers
         pass
-    return data.decode("utf-8", errors="replace")
+    return data.decode("utf-8", errors="replace"), final_url
 
 
 def _html_to_text(raw: str) -> str:
@@ -267,7 +397,7 @@ def fetch_url(url: str, max_chars: int = 8000) -> dict[str, Any]:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return {"ok": False, "error": "Only absolute http(s) URLs are allowed.", "url": url}
         limit = max(500, min(int(max_chars or 8000), 20_000))
-        raw = _http_text(parsed.geturl())
+        raw, final_url = _http_text(parsed.geturl())
         title_m = re.search(r"(?is)<title[^>]*>(.*?)</title>", raw)
         title = _html_to_text(title_m.group(1))[:200] if title_m else ""
         text = _html_to_text(raw)
@@ -275,7 +405,7 @@ def fetch_url(url: str, max_chars: int = 8000) -> dict[str, Any]:
         text = text[:limit]
         return {
             "ok": True,
-            "url": parsed.geturl(),
+            "url": final_url,
             "title": title or None,
             "chars": len(text),
             "truncated": truncated,
