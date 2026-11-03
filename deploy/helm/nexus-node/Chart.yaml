@@ -1,0 +1,6 @@
+apiVersion: v2
+name: nexus-node
+description: Nexus Node web hub (FastAPI + React PWA) with persistent data volume
+type: application
+version: 0.1.0
+appVersion: "0.3.0"

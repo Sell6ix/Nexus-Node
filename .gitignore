@@ -14,3 +14,11 @@ data/**
 !data/.gitkeep
 data/jwt_secret.txt
 data/accounts.json
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+backend.hcl
+crash.log

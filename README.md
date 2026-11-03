@@ -67,6 +67,15 @@ python main.py --mode web --tls          # self-signed cert in data/certs/
 
 Trust `data/certs/cert.pem` once in the browser (Chrome will warn). Better: Tailscale Serve with a real cert.
 
+## Docker / AWS
+
+```bash
+docker build -t nexus-node .
+docker run -p 8743:8743 -v nexus-data:/data nexus-node
+```
+
+Cloud deployment on Amazon EKS (Terraform, Helm, Argo CD, GitHub Actions with OIDC → ECR): see [infra/README.md](infra/README.md).
+
 ## Tests
 
 ```bash

@@ -1,0 +1,33 @@
+# Argo CD watches the chart on main; the release workflow bumps
+# values-prod.yaml -> Argo CD syncs the new image automatically.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: nexus-node
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Sell6ix/Nexus-Node.git
+    targetRevision: main
+    path: deploy/helm/nexus-node
+    helm:
+      valueFiles:
+        - values-prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: nexus-node
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m

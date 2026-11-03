@@ -1,0 +1,74 @@
+image:
+  repository: ghcr.io/sell6ix/nexus-node
+  tag: ""          # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+# The hub keeps its state in files under /data, so it runs as a single
+# replica with a Recreate rollout (RWO volume can't be shared).
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  name: ""
+
+# Secret with NEXUS_SECRETS_KEY and NEXUS_JWT_SECRET (and any other env).
+# Create it out of band, e.g.:
+#   kubectl create secret generic nexus-node-env \
+#     --from-literal=NEXUS_SECRETS_KEY=... --from-literal=NEXUS_JWT_SECRET=...
+existingSecret: nexus-node-env
+
+env:
+  NEXUS_WEB_HOST: "0.0.0.0"
+  NEXUS_WEB_PORT: "8743"
+  DEVICE_ID: "eks-hub"
+  DEVICE_NAME: "Nexus Hub (EKS)"
+
+service:
+  type: ClusterIP
+  port: 80
+
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClassName: nexus-node-gp3
+
+# gp3 StorageClass whose volumes carry the tag the Terraform DLM policy snapshots.
+storageClass:
+  create: true
+  backupTag: nexus-node
+
+# Off by default: the README warns against exposing the hub publicly.
+# Use `kubectl port-forward` or Tailscale, or enable with an internal ALB.
+ingress:
+  enabled: false
+  className: alb
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internal
+    alb.ingress.kubernetes.io/target-type: ip
+  host: ""
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
