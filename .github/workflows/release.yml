@@ -1,0 +1,62 @@
+name: Release
+
+# On every push to main: build the image, push it to ECR with the commit SHA
+# as tag, then bump values-prod.yaml so Argo CD rolls it out (GitOps).
+# Needs repo variables AWS_ROLE_ARN, AWS_REGION, ECR_REPOSITORY (Terraform outputs).
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "deploy/helm/nexus-node/values-prod.yaml"
+      - "**.md"
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  image:
+    if: vars.AWS_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - id: meta
+        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Bump image in values-prod.yaml
+        env:
+          REPO: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          file=deploy/helm/nexus-node/values-prod.yaml
+          yq -i '.image.repository = strenv(REPO) | .image.tag = strenv(TAG)' "$file"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$file"
+          git commit -m "deploy: nexus-node ${TAG}"
+          git push

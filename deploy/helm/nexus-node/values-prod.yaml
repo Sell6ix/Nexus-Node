@@ -1,0 +1,8 @@
+# Production overrides. image.tag is bumped by the release workflow (GitOps);
+# Argo CD picks up the commit and rolls the Deployment.
+image:
+  repository: 123456789012.dkr.ecr.il-central-1.amazonaws.com/nexus-node
+  tag: "0.3.0"
+
+persistence:
+  size: 10Gi

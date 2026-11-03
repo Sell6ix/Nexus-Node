@@ -1,0 +1,14 @@
+region      = "il-central-1"
+environment = "prod"
+
+# Lock the EKS API to your own IP.
+cluster_endpoint_public_access_cidrs = ["203.0.113.10/32"]
+
+node_capacity_type = "SPOT"
+node_count = {
+  min     = 1
+  desired = 2
+  max     = 3
+}
+
+github_repository = "Sell6ix/Nexus-Node"
